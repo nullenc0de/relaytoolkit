@@ -1,221 +1,226 @@
-# NTLM Relay Toolkit
+# NTLM Collection & Relay Toolkit
 
-A modern Python-based NTLM relay toolkit that combines multiple attack vectors for network penetration testing. This toolkit automates various relay attacks, coercion techniques, and credential capture methods.
+A Python toolkit for testing Windows Active Directory environments from an unauthenticated position. Automates common NTLM hash collection and relay techniques for security assessments.
 
-## Overview
+⚠️ **IMPORTANT**: This tool is for authorized security testing only. Usage without explicit permission is prohibited.
 
-The NTLM Relay Toolkit automates several attack vectors:
-- LLMNR/NBT-NS/mDNS poisoning
-- SMB Relay
-- LDAP(S) Relay
-- HTTP(S) Relay
-- WebDAV Coercion
-- ADCS ESC8 Attacks
-- Shadow Credentials
-- IPv6 DNS Poisoning
-- Resource-Based Constrained Delegation
+## Features
 
-## Quick Start
+### Automatic Mode
+Performs comprehensive testing sequence:
+1. Initial Reconnaissance
+   - Detects broadcast protocols (LLMNR/NBT-NS/mDNS)
+   - Identifies systems with SMB signing disabled
+   - Discovers potential ADCS endpoints
+   - Maps attack surface
 
-```bash
-# Install
-sudo python3 install.py
+2. Active Collection
+   - Broadcast protocol poisoning
+   - DHCP WPAD injection
+   - Multiple coercion file deployment
+   - IPv6 DNS takeover
 
-# Basic usage
-sudo ./relay.py --auto -d domain.local
+3. Relay Attacks
+   - SMB relay with SOCKS proxy
+   - LDAPS relay with computer account creation
+   - ADCS certificate theft
+   - Shadow Credentials attacks
 
-# Advanced usage with specific attacks
-sudo ./relay.py -i eth0 --adcs --shadow-credentials --webdav -d domain.local
-```
+### Individual Techniques
+- **Protocol Poisoning**
+  - LLMNR/NBT-NS/mDNS responses
+  - WPAD injection
+  - IPv6 DNS takeover
+  
+- **Coercion Files**
+  - WebDAV search connectors
+  - SCF files
+  - URL shortcuts
+  - Print notifications
 
-## Prerequisites
-
-- Linux-based OS (tested on Kali Linux)
-- Python 3.8+
-- Root privileges
-- Git
-- Python3-pip
+- **Relay Capabilities**
+  - SMB relay
+  - LDAPS relay
+  - ADCS relay
+  - SOCKS proxy support
 
 ## Installation
 
-1. Clone the repository:
+### Requirements
+- Python 3.8+
+- Root/Administrator privileges
+
+### Setup
 ```bash
-git clone https://github.com/yourusername/ntlm-relay-toolkit.git
-cd ntlm-relay-toolkit
+# Clone repository
+git clone https://github.com/your-repo/ntlm-toolkit.git
+cd ntlm-toolkit
+
+# Install Python requirements
+pip install -r requirements.txt
+
+# Install core tools
+pip install netexec
+pip install impacket
+pip install responder
+pip install certipy-ad
+pip install mitm6
 ```
 
-2. Run the installer:
-```bash
-sudo python3 install.py
+### Dependencies
+Create requirements.txt:
 ```
-
-The installer will:
-- Create necessary directories
-- Install Python dependencies
-- Set up required tools
-- Configure file permissions
-- Verify installations
-
-## Directory Structure
-
-```
-ntlm-relay-toolkit/
-├── relay.py                  # Main script
-├── install.py               # Installation script
-├── web/                     # Web server root
-│   ├── payloads/           # PowerShell payloads
-│   └── templates/          # Attack templates
-├── logs/                    # Log files
-├── certs/                   # ADCS certificates
-└── tools/                   # External tools
+netexec>=1.0.0
+impacket>=0.10.0
+responder>=3.1.3
+certipy-ad>=4.0.0
+mitm6>=0.3.0
+termcolor>=2.3.0
+netifaces>=0.11.0
 ```
 
 ## Usage
 
-### Basic Command Options
-
+### Auto Mode (Recommended)
 ```bash
-usage: relay.py [-h] [-i INTERFACE] [-t TARGET_FILE] [-d DOMAIN] [-c COMMAND] [-p PORT]
-                [--no-mitm6] [--no-http] [--no-smb] [--adcs] [--shadow-credentials]
-                [--webdav] [--delegate-access] [--auto] [--analyze]
+# Full automatic testing
+sudo python3 toolkit.py --auto \
+    -i eth0 \
+    -dc 192.168.1.10 \
+    -d corp.local \
+    --target-range 192.168.1.0/24
 
-arguments:
-  -h, --help            show help message
-  -i INTERFACE          network interface to use
-  -t TARGET_FILE        file containing relay targets
-  -d DOMAIN            domain for mitm6 attack
-  -c COMMAND           command to execute on successful relay
-  -p PORT              HTTP server port (default: 8080)
-
-attack vectors:
-  --no-mitm6           disable mitm6 DNS poisoning
-  --no-http            disable HTTP relay
-  --no-smb             disable SMB relay
-  --adcs               enable ADCS ESC8 attack
-  --shadow-credentials enable shadow credentials attack
-  --webdav             enable WebDAV coercion
-  --delegate-access    configure delegation access
-
-modes:
-  --auto               enable automated attack sequence
-  --analyze            run Responder in analyze mode
+# Analysis mode only (no poisoning)
+sudo python3 toolkit.py --auto --analyze -i eth0
 ```
 
-### Attack Scenarios
+### Manual Techniques
 
-1. Automated Attack:
+Basic Collection:
 ```bash
-sudo ./relay.py --auto -d domain.local
+# Start hash collection
+sudo python3 toolkit.py -i eth0
+
+# With NTLM downgrade
+sudo python3 toolkit.py -i eth0 -c 1122334455667788
 ```
 
-2. ADCS ESC8 Attack:
+SMB Relay:
 ```bash
-sudo ./relay.py --adcs -d domain.local -t targets.txt
+# SMB relay with SOCKS
+sudo python3 toolkit.py -i eth0 --relay --relay-type smb --socks
+
+# LDAPS relay for computer account creation
+sudo python3 toolkit.py -i eth0 --relay --relay-type ldaps --dc-ip 192.168.1.10
+
+# ADCS relay
+sudo python3 toolkit.py -i eth0 --relay --relay-type adcs --dc-ip 192.168.1.10
 ```
 
-3. Shadow Credentials Attack:
+IPv6 Attacks:
 ```bash
-sudo ./relay.py --shadow-credentials -d domain.local -t targets.txt
+# IPv6 DNS poisoning
+sudo python3 toolkit.py -i eth0 --ipv6 -d corp.local
 ```
 
-4. WebDAV Coercion:
-```bash
-sudo ./relay.py --webdav -d domain.local -t targets.txt
+## Command Line Options
+
+```
+Required Arguments:
+  -i, --interface     Network interface to use
+
+Target Specification:
+  -dc, --dc-ip       Domain controller IP
+  -d, --domain       Domain name for IPv6/WPAD attacks
+  -tr, --target-range Target subnet for relay discovery (default: 192.168.1.0/24)
+
+Attack Modes:
+  --auto             Enable automated attack sequence
+  --analyze          Run in analyze mode only
+  -r, --relay        Enable NTLM relay
+  --ipv6             Enable IPv6 attacks
+
+Relay Options:
+  -rt, --relay-type  Relay protocol (smb, ldaps, adcs)
+  -s, --socks        Enable SOCKS proxy
+
+Collection Options:
+  -p, --port         HTTP server port (default: 8080)
+  -c, --challenge    Custom NTLM challenge for downgrade
+  --dhcp             Enable DHCP poisoning
 ```
 
-5. Analysis Mode:
+## Common Workflows
+
+### Initial Access Testing
+1. Start with analyze mode to identify opportunities:
 ```bash
-sudo ./relay.py --analyze -i eth0
+sudo python3 toolkit.py --auto --analyze -i eth0
 ```
 
-## Attack Vectors Explained
+2. Run full auto sequence when ready:
+```bash
+sudo python3 toolkit.py --auto -i eth0 -dc 192.168.1.10 -d corp.local
+```
 
-### 1. LLMNR/NBT-NS/mDNS Poisoning
-- Exploits name resolution fallback
-- Captures NetNTLMv2 hashes
-- Uses Responder for poisoning
+3. Monitor captured hashes in Responder logs:
+```bash
+tail -f /usr/share/responder/logs/SMB-NTLMv2-SSP-192.168.1.10.txt
+```
 
-### 2. SMB Relay
-- Relays captured SMB authentication
-- Requires targets with SMB signing disabled
-- Can execute commands on successful relay
+### Targeted Relay
+1. Generate relay target list:
+```bash
+netexec smb 192.168.1.0/24 --gen-relay-list targets.txt
+```
 
-### 3. LDAP(S) Relay
-- Relays authentication to domain controllers
-- Can modify AD objects
-- Supports delegation attacks
+2. Start relay with SOCKS:
+```bash
+sudo python3 toolkit.py -i eth0 --relay --relay-type smb --socks
+```
 
-### 4. ADCS ESC8
-- Exploits certificate templates
-- Supports domain escalation
-- Certificate request attacks
+3. Use collected hashes with your preferred cracking tool:
+```bash
+hashcat -m 5600 hashes.txt wordlist.txt
+```
 
-### 5. Shadow Credentials
-- Modifies msDS-KeyCredentialLink
-- Alternative to RBCD attacks
-- Requires AD CS infrastructure
+## Defense Recommendations
 
-### 6. WebDAV Coercion
-- Forces WebDAV authentication
-- Works with SMB disabled targets
-- Supports cross-protocol attacks
+To protect against these attack vectors:
 
-## Logging and Output
+1. Disable Legacy Protocols
+   - LLMNR: `Get-DnsClient | Set-DnsClient -EnableMulticast $false`
+   - NBT-NS: Disable NetBIOS over TCP/IP
+   - WPAD: Disable automatic proxy detection
+   - IPv6: If not in use
 
-Logs are stored in the `logs/` directory:
-- `relay.log`: Main relay operations
-- `responder.log`: Responder capture logs
-- `ntlmrelay.log`: NTLM relay events
-- `mitm6.log`: IPv6 poisoning logs
+2. Enable Security Features
+   - SMB Signing (Required)
+   - LDAP Signing
+   - Channel Binding
+   - EPA for HTTP/LDAP
 
-## Defense Detection
+3. Network Segmentation
+   - Implement tiered administration
+   - Control broadcast domains
+   - Filter RPC traffic
 
-This tool may trigger:
-- Windows Event ID 4624 (Successful Logon)
-- Windows Event ID 4625 (Failed Logon)
-- Windows Event ID 4768 (Kerberos TGT Request)
-- Windows Event ID 4769 (Kerberos Service Ticket Request)
-- Network IDS alerts for LLMNR/NBT-NS traffic
-- Unusual IPv6 DNS traffic
-
-## Mitigations
-
-Organizations should:
-- Disable LLMNR/NBT-NS/mDNS
-- Enable SMB Signing
-- Implement LDAP Signing
-- Configure ADCS security
-- Monitor for abnormal authentication
-- Use network segmentation
-- Disable WebDAV when unnecessary
-- Monitor AD object modifications
-
-## Contributing
-
-1. Fork the repository
-2. Create feature branch
-3. Commit changes
-4. Push to branch
-5. Create Pull Request
+4. Additional Hardening
+   - Disable WebDAV client service
+   - Remove ADCS web enrollment
+   - Disable Print Spooler where unnecessary
+   - Set Machine Account Quota to 0
 
 ## References
 
-- [Responder](https://github.com/lgandx/Responder)
-- [Impacket](https://github.com/fortra/impacket)
-- [mitm6](https://github.com/dirkjanm/mitm6)
-- [NetExec](https://github.com/Pennyw0rth/NetExec)
+- [The Worst of Both Worlds: NTLM Relaying and Kerberos Delegation](https://dirkjanm.io/worst-of-both-worlds-ntlm-relaying-and-kerberos-delegation/)
+- [Practical Guide to NTLM Relaying](https://byt3bl33d3r.github.io/practical-guide-to-ntlm-relaying-in-2017-aka-getting-a-foothold-in-under-5-minutes.html)
+- [I'm Bringing Relaying Back - TrustedSec](https://www.trustedsec.com/blog/im-bringing-relaying-back-a-comprehensive-guide-on-relaying-anno-2022/)
 
 ## Disclaimer
 
-This tool is for educational and authorized testing only. Use responsibly and only against systems you own or have explicit permission to test.
+This tool is for authorized security testing only. The authors assume no liability for misuse or damage. Always obtain explicit permission before testing.
 
 ## License
 
-MIT License - see LICENSE file for details
-
-## Acknowledgments
-
-- Dirk-jan Mollema
-- Laurent Gaffié
-- Benjamin Delpy
-- And all other security researchers who developed the original tools and techniques
+This project is licensed under the MIT License - see the LICENSE file for details.
