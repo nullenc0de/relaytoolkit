@@ -169,9 +169,10 @@ class CredentialToolkit:
             if responder_logs.exists():
                 os.symlink(responder_logs, self.output_dir / 'responder')
             
+            return True
             self.print_bad(f"Error setting up output directory: {str(e)}")
             return False
-
+            
     def get_default_interface(self):
         """Get default network interface"""
         return netifaces.gateways()['default'][netifaces.AF_INET][1]
