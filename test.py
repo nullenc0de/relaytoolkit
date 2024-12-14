@@ -25,6 +25,9 @@ class HashCapture:
         self.processes = {}
         self.attack_threads = []
         self.local_ip = self.get_local_ip()
+
+        # Get the global logger instance
+        self.logger = logging.getLogger(__name__)
         
         # Configure signal handlers
         signal.signal(signal.SIGINT, self.signal_handler)
@@ -372,21 +375,20 @@ class HashCapture:
 
     def run(self):
         """Main execution flow running all attacks simultaneously"""
-        global logger
-        logger.info("Starting Hash Capture Operation")
+        self.logger.info("Starting Hash Capture Operation")
         
         # Run all checks first
-        logger.info("Running system and dependency checks...")
+        self.logger.info("Running system and dependency checks...")
         if not self.check_dependencies():
             return False
         
         if self.domain:
-            logger.info("Checking Active Directory configuration...")
+            self.logger.info("Checking Active Directory configuration...")
             self.check_active_directory_config()
         
             # Create Targets File
             if not self.create_targets_file():
-                logger.error("Failed to create targets file")
+                self.logger.error("Failed to create targets file")
                 return False
         
         try:
@@ -409,14 +411,14 @@ class HashCapture:
                 thread.start()
                 self.attack_threads.append(thread)
 
-            logger.info("All attacks started successfully")
+            self.logger.info("All attacks started successfully")
 
             # Monitor attack threads
             while not self.stop_event.is_set():
                 time.sleep(1)
                 
         except KeyboardInterrupt:
-            logger.info("Operation interrupted by user")
+            self.logger.info("Operation interrupted by user")
         finally:
             self.cleanup()
         
