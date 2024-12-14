@@ -406,7 +406,7 @@ def start_petitpotam(self):
             self.logger.error(f"Error in start_petitpotam: {e}")
             return False
 
-    def start_printerbug(self):
+def start_printerbug(self):
         """Start PrinterBug attack"""
         try:
             if not self.domain or not self.get_dc_ip():
