@@ -29,8 +29,9 @@ logging.basicConfig(
 )
 
 class HashCapture:
-    def __init__(self, interface, domain=None, creds=None, verbose=True):
+    def __init__(self, interface, duration=600, domain=None, creds=None, verbose=True):
         self.interface = interface
+        self.duration = duration
         self.domain = domain
         self.creds = creds
         self.verbose = verbose
@@ -41,7 +42,7 @@ class HashCapture:
         self.original_ipv6_forward = None
         self.dc_ip = None
 
-        # Get the global logger instance
+        # Initialize logger
         self.logger = logging.getLogger(__name__)
         
         # Set up attack loggers
@@ -385,17 +386,6 @@ class HashCapture:
             self.logger.error(f"Error in start_printerbug: {e}")
             return False
 
-class HashCapture:
-    def __init__(self, interface, duration=600, domain=None, creds=None, verbose=True):
-        self.interface = interface
-        self.duration = duration
-        self.domain = domain
-        self.creds = creds
-        self.verbose = verbose
-        # ... (rest of the __init__ method remains the same)
-
-    # ... (other methods remain the same)
-
     def extract_hashes(self):
         """Extract captured hashes and passwords from Responder and MITM6 logs"""
         hashes = []
@@ -448,6 +438,7 @@ class HashCapture:
                     thread.start()
                     self.attack_threads.append(thread)
                     time.sleep(1)  # Small delay between starting attacks
+#part 2
                     self.logger.info(f"{attack_name} attack thread started successfully")
                 except Exception as e:
                     self.logger.error(f"Failed to start {attack_name} attack: {e}")
@@ -486,6 +477,7 @@ class HashCapture:
         
         return True
 
+#part 2
 def main():
     parser = argparse.ArgumentParser(description="Hash Capture Tool")
     parser.add_argument("-i", "--interface", required=True, help="Network interface to use")
