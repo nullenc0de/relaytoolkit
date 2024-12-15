@@ -462,8 +462,8 @@ class HashCapture:
             self.stop_event.clear()
 
             # Wait for 10 seconds before starting MITM6
-            self.logger.info("Waiting 10 seconds before starting MITM6...")
-            time.sleep(10)
+            self.logger.info("Waiting 60 seconds before starting MITM6...")
+            time.sleep(60)
 
             # Run MITM6 for the specified duration
             self.logger.info(f"Starting MITM6 for {self.duration} seconds...")
