@@ -390,22 +390,31 @@ class HashCapture:
         """Extract captured hashes and passwords from Responder and MITM6 logs"""
         hashes = []
 
-        # Extract from Responder log
-        with open("Responder-Session.log", "r") as f:
-            for line in f:
-                if "NTLMv1" in line or "NTLMv2" in line:
-                    hashes.append(line.strip())
+        # Extract from Responder log if it exists
+        if os.path.isfile("Responder-Session.log"):
+            with open("Responder-Session.log", "r") as f:
+                for line in f:
+                    if "NTLMv1" in line or "NTLMv2" in line:
+                        hashes.append(line.strip())
+        else:
+            self.logger.warning("Responder-Session.log not found, skipping hash extraction for Responder")
 
-        # Extract from MITM6 log
-        with open("mitm6.log", "r") as f:
-            for line in f:
-                if "NTLMv1" in line or "NTLMv2" in line:
-                    hashes.append(line.strip())
+        # Extract from MITM6 log if it exists
+        if os.path.isfile("mitm6.log"):
+            with open("mitm6.log", "r") as f:
+                for line in f:
+                    if "NTLMv1" in line or "NTLMv2" in line:
+                        hashes.append(line.strip())
+        else:
+            self.logger.warning("mitm6.log not found, skipping hash extraction for MITM6")
 
-        with open("captured_hashes.txt", "w") as f:
-            f.write("\n".join(hashes))
+        if hashes:
+            with open("captured_hashes.txt", "w") as f:
+                f.write("\n".join(hashes))
 
-        self.logger.info(f"Extracted {len(hashes)} hashes/passwords to captured_hashes.txt")
+            self.logger.info(f"Extracted {len(hashes)} hashes/passwords to captured_hashes.txt")
+        else:
+            self.logger.warning("No hashes captured during the attack")
 
     def run(self):
         """Main execution flow running all attacks"""
@@ -438,7 +447,6 @@ class HashCapture:
                     thread.start()
                     self.attack_threads.append(thread)
                     time.sleep(1)  # Small delay between starting attacks
-#part 2
                     self.logger.info(f"{attack_name} attack thread started successfully")
                 except Exception as e:
                     self.logger.error(f"Failed to start {attack_name} attack: {e}")
@@ -452,6 +460,10 @@ class HashCapture:
             self.stop_event.set()
             responder_thread.join()
             self.stop_event.clear()
+
+            # Wait for 10 seconds before starting MITM6
+            self.logger.info("Waiting 10 seconds before starting MITM6...")
+            time.sleep(10)
 
             # Run MITM6 for the specified duration
             self.logger.info(f"Starting MITM6 for {self.duration} seconds...")
