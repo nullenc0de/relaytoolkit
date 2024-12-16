@@ -70,6 +70,47 @@ class HashCapture:
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
 
+    def signal_handler(self, signum, frame):
+        """Handle interruption signals"""
+        self.logger.info(f"Received signal {signum}")
+        self.cleanup()
+        sys.exit(0)
+
+    def cleanup(self):
+        """Cleanup resources and restore system state"""
+        try:
+            # Stop all processes
+            for name, process in self.processes.items():
+                try:
+                    process.terminate()
+                    process.wait(timeout=5)
+                except Exception as e:
+                    self.logger.warning(f"Error stopping {name}: {e}")
+                    try:
+                        process.kill()
+                    except:
+                        pass
+
+            # Restore IPv6 forwarding state
+            if self.original_ipv6_forward is not None:
+                try:
+                    with open('/proc/sys/net/ipv6/conf/all/forwarding', 'w') as f:
+                        f.write(self.original_ipv6_forward)
+                except Exception as e:
+                    self.logger.error(f"Error restoring IPv6 forwarding: {e}")
+
+            # Additional cleanup tasks
+            for file in ['targets.txt']:
+                try:
+                    if os.path.exists(file):
+                        os.remove(file)
+                except Exception as e:
+                    self.logger.warning(f"Error removing {file}: {e}")
+
+            self.logger.info("Cleanup completed")
+        except Exception as e:
+            self.logger.error(f"Error in cleanup: {e}")
+
     def get_local_ip(self):
         """Get the local IP address of the specified interface"""
         try:
