@@ -86,52 +86,50 @@ class HashCapture:
             self.logger.error(f"Error getting local IP: {e}")
             return None
 
-    def signal_handler(self, signum, frame):
-        """Handle interruption signals"""
-        self.logger.info(f"Received signal {signum}")
-        self.cleanup()
-        sys.exit(0)
-
-    def process_output(self, process, logger, prefix=""):
-        """Process and log output from a subprocess"""
-        try:
-            for line in iter(process.stdout.readline, ''):
-                if self.stop_event.is_set():
-                    break
-                if line:
-                    line = line.strip()
-                    if line:
-                        logger.debug(f"{prefix}: {line}")
-        except Exception as e:
-            logger.error(f"Error processing output: {e}")
-
-    def setup_ipv6_forwarding(self):
-        """Enable IPv6 forwarding"""
-        try:
-            # Save original IPv6 forwarding state
-            with open('/proc/sys/net/ipv6/conf/all/forwarding', 'r') as f:
-                self.original_ipv6_forward = f.read().strip()
-
-            # Enable IPv6 forwarding
-            subprocess.run(["sysctl", "-w", "net.ipv6.conf.all.forwarding=1"], check=True)
-            return True
-        except Exception as e:
-            self.logger.error(f"Failed to setup IPv6 forwarding: {e}")
-            return False
-
     def create_targets_file(self):
         """Create targets file for attacks if domain is specified"""
         if not self.domain:
             return True
         
         try:
-            # Resolve domain controller IP
-            self.dc_ip = socket.gethostbyname(f"dc.{self.domain}")
-            
-            # Create targets file
-            with open('targets.txt', 'w') as f:
-                f.write(f"{self.dc_ip}\n")
-            return True
+            # Method 1: Try resolving via ping
+            try:
+                # Run ping command with timeout
+                result = subprocess.run(
+                    ["ping", "-c", "1", "-W", "1", self.domain],
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                
+                # Extract IP using regex
+                ip_match = re.search(r'PING \S+ \((\d+\.\d+\.\d+\.\d+)\)', result.stdout)
+                if ip_match:
+                    self.dc_ip = ip_match.group(1)
+                    self.logger.info(f"Found DC IP via ping: {self.dc_ip}")
+                    
+                    # Create targets file
+                    with open('targets.txt', 'w') as f:
+                        f.write(f"{self.dc_ip}\n")
+                    return True
+            except subprocess.CalledProcessError as e:
+                self.logger.debug(f"Ping resolution failed: {e}")
+            except Exception as e:
+                self.logger.debug(f"Error in ping resolution: {e}")
+
+            # If ping fails, try socket methods
+            try:
+                self.dc_ip = socket.gethostbyname(self.domain)
+                self.logger.info(f"Found DC IP via socket: {self.dc_ip}")
+                with open('targets.txt', 'w') as f:
+                    f.write(f"{self.dc_ip}\n")
+                return True
+            except socket.gaierror:
+                self.logger.debug(f"Socket resolution failed for {self.domain}")
+
+            self.logger.error("Could not resolve domain using any method")
+            return False
+                
         except Exception as e:
             self.logger.error(f"Error creating targets file: {e}")
             return False
