@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 import os
 import sys
 import time
@@ -87,20 +85,6 @@ class HashCapture:
         self.logger.info(f"Received signal {signum}")
         self.cleanup()
         sys.exit(0)
-
-    def setup_ipv6_forwarding(self):
-        """Enable IPv6 forwarding"""
-        try:
-            # Save original IPv6 forwarding state
-            with open('/proc/sys/net/ipv6/conf/all/forwarding', 'r') as f:
-                self.original_ipv6_forward = f.read().strip()
-
-            # Enable IPv6 forwarding
-            subprocess.run(["sysctl", "-w", "net.ipv6.conf.all.forwarding=1"], check=True)
-            return True
-        except Exception as e:
-            self.logger.error(f"Failed to setup IPv6 forwarding: {e}")
-            return False
 
     def process_output(self, process, logger, prefix=""):
         """Process and log output from a subprocess"""
