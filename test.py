@@ -80,6 +80,20 @@ class HashCapture:
             self.logger.error(f"Error getting local IP: {e}")
             return None
 
+    def setup_ipv6_forwarding(self):
+        """Enable IPv6 forwarding"""
+        try:
+            # Save original IPv6 forwarding state
+            with open('/proc/sys/net/ipv6/conf/all/forwarding', 'r') as f:
+                self.original_ipv6_forward = f.read().strip()
+
+            # Enable IPv6 forwarding
+            subprocess.run(["sysctl", "-w", "net.ipv6.conf.all.forwarding=1"], check=True)
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to setup IPv6 forwarding: {e}")
+            return False
+
     def signal_handler(self, signum, frame):
         """Handle interruption signals"""
         self.logger.info(f"Received signal {signum}")
@@ -98,6 +112,7 @@ class HashCapture:
                         logger.debug(f"{prefix}: {line}")
         except Exception as e:
             logger.error(f"Error processing output: {e}")
+
 
     def create_targets_file(self):
         """Create targets file for attacks if domain is specified"""
